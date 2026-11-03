@@ -1,0 +1,26 @@
+{
+  "skill_name": "esdd",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to add rate limiting to this API. It needs per-endpoint limits configured in YAML, a shared Redis store so all instances count together, and it must not add more than 5ms to p99 latency. ESDD this feature for me.",
+      "expected_output": "Full ESDD pipeline: .esdd scaffolded (or reused), spec 'rate-limit' with INVEST-checked proposal.md, utility-tree.md with ASRs and H/M/L-ranked QAS (latency QAS with numeric measure), design.md with C4 + sequence diagrams, spec-level MADR ADRs, Taskwarrior task graph under project <ws>.core.rate-limit with blocking edges, estimates under 100k, index task with synced adrs UDA. Human must be grilled during the run (scripted answers: yes to defaults, per-endpoint limits negotiable, team owns Redis ops).",
+      "files": [],
+      "notes": "Interactive: the runner must answer INVEST/QAW/ranking questions with the scripted answers above. Assertions to draft at run time: file existence, QAS measure numeric, project naming, verify passes."
+    },
+    {
+      "id": 2,
+      "prompt": "We already have a proposal for the checkout spec in .esdd/specs/checkout/proposal.md. Run just the QAW and utility tree phases, then stop — I want to review the ranked QAS before any design work starts.",
+      "expected_output": "Standalone phase entry: only utility-tree.md populated (drivers, ASR table, ranked QAS with validated H/M/L). No design.md content beyond the template, no tasks created. Orchestrator asks ranking-validation questions and stops after Phase 3.",
+      "files": [],
+      "notes": "Requires a pre-seeded .esdd workspace with a checkout spec. Assert utility-tree sections filled, design.md untouched, zero tasks in Taskwarrior project."
+    },
+    {
+      "id": 3,
+      "prompt": "Break the payments-retry feature into agent-sized tasks using exhaustive spec-driven development. I will personally run the chaos engineering tests, so mark those as mine.",
+      "expected_output": "Full pipeline ending in handoff: task graph with depends edges, chaos-testing tasks carrying worker:human, esdd verify passes, and the handoff summary includes the human work order listing the chaos tasks. Agent tasks each have briefs, touches, and token_estimate under the soft limit.",
+      "files": [],
+      "notes": "Scripted answer for the worker-selection question: human takes all chaos/ load-test tasks. Assert worker UDA distribution and verify exit code."
+    }
+  ]
+}

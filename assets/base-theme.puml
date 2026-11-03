@@ -1,0 +1,40 @@
+' ESDD base theme - include at the top of every ESDD diagram.
+' Adjust the relative path to reach esdd/assets/ from the diagram file:
+'   !include ../../assets/base-theme.puml
+'
+' For C4 diagrams, ALSO include exactly one level include AFTER this file:
+'   !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+'   !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+'   !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 13
+skinparam ArrowColor #444444
+skinparam ArrowThickness 1.5
+
+skinparam noteBackgroundColor #FFF8DC
+skinparam noteBorderColor #999999
+
+skinparam class {
+  BackgroundColor #FDF6E3
+  BorderColor #B58900
+}
+skinparam activity {
+  BackgroundColor #E8F0FE
+  BorderColor #4472C4
+}
+skinparam state {
+  BackgroundColor #E8F0FE
+  BorderColor #4472C4
+}
+skinparam sequence {
+  ArrowColor #444444
+  LifeLineBorderColor #999999
+  ParticipantBorderColor #4472C4
+  ParticipantBackgroundColor #E8F0FE
+}
+skinparam entity {
+  BackgroundColor #F3E5F5
+  BorderColor #7B1FA2
+}

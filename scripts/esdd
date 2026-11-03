@@ -1,0 +1,822 @@
+#!/usr/bin/env python3
+"""esdd - Exhaustive Spec-Driven Development toolkit.
+
+Stdlib-only CLI. Wraps Taskwarrior with upward .esdd discovery and UDA
+injection, scaffolds MADR ADRs at three levels, and enforces the ESDD
+token budget at handoff.
+
+Subcommands:
+  init                 scaffold .esdd/ in the current directory
+  doctor               check the installation and workspace
+  env [K [V]]          read/write .esdd/env (graph nav configuration)
+  tw [--batch] -- ARGS run task(1) against the nearest .esdd/tasks
+  spec new|list        scaffold a spec workspace (and its index task)
+  adr new|list         MADR ADRs at global / directory / spec level
+  matrix [--spec S]    blocking-edge matrix from `task export`
+  estimate [--spec S]  token estimates from each task's touches UDA
+  verify --spec S      handoff gate: index task, ADRs, budgets, cycles
+  phase [NAME]         phase state tracker with prerequisite checks
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import date
+from pathlib import Path
+
+ESDD_DIR = ".esdd"
+SOFT_LIMIT = 100_000          # preferred max context per task
+HARD_LIMIT = 140_000          # absolute stop; requires human sign-off
+PER_FILE_OVERHEAD = 1500      # tokens of tooling/path overhead per touched file
+SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+GRAPH_NAV_CHOICES = ["codegraph", "graphify", "falkordb", "neo4j", "custom", "none"]
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ASSETS = SCRIPT_DIR.parent / "assets"
+
+UDA_OVERRIDES = [
+    "rc.uda.adrs.type=string",
+    "rc.uda.token_estimate.type=numeric",
+    "rc.uda.touches.type=string",
+    "rc.uda.worker.type=string",
+]
+
+PHASES = {
+    "product": {"refs": ["references/invest.md"], "requires": []},
+    "qaw": {"refs": ["references/qaw.md"], "requires": ["specs/{s}/proposal.md"]},
+    "tree": {"refs": ["references/utility-tree.md"], "requires": ["specs/{s}/proposal.md"]},
+    "add": {
+        "refs": ["references/add.md", "references/c4-plantuml.md"],
+        "requires": ["specs/{s}/proposal.md", "specs/{s}/utility-tree.md"],
+    },
+    "atam": {"refs": ["references/atam.md"], "requires": ["specs/{s}/design.md"]},
+    "handoff": {
+        "refs": ["references/token-budget.md", "references/taskwarrior.md"],
+        "requires": ["specs/{s}/design.md"],
+    },
+}
+
+
+# ---------------------------------------------------------------- output ---
+
+def out(msg=""):
+    print(msg)
+
+
+def die(msg, code=1):
+    print(f"esdd: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def warn(msg):
+    print(f"esdd: warning: {msg}", file=sys.stderr)
+
+
+# ----------------------------------------------------------------- paths ---
+
+def find_root(explicit=None):
+    """Return the workspace root: the directory that contains .esdd/."""
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if (p / ESDD_DIR).is_dir():
+            return p
+        die(f"no {ESDD_DIR}/ directory under {p} (run: esdd init)")
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ESDD_DIR).is_dir():
+            return cur
+        if cur.parent == cur:
+            die(f"no {ESDD_DIR}/ found in this directory or any parent "
+                f"(run: esdd init at your workspace root)")
+        cur = cur.parent
+
+
+def slugify(text):
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-")
+
+
+def check_slug(slug, what="slug"):
+    if not SLUG_RE.match(slug or ""):
+        die(f"invalid {what} '{slug}': lowercase letters, digits and hyphens "
+            f"only; no dots (dots are Taskwarrior's project separator)")
+
+
+def workspace_name(root):
+    return slugify(root.name) or "workspace"
+
+
+def assets_path(name):
+    p = ASSETS / name
+    return p if p.exists() else None
+
+
+def render_template(name, mapping, dest):
+    src = assets_path(name)
+    if not src:
+        die(f"missing template {name} (expected at {src})")
+    text = src.read_text()
+    for k, v in mapping.items():
+        text = text.replace(f"<{k}>", str(v))
+    Path(dest).write_text(text)
+    return Path(dest)
+
+
+# ------------------------------------------------------------ taskwarrior ---
+
+def task_binary():
+    return shutil.which("task")
+
+
+def run_task(root, args, batch=False):
+    """Run task(1) with .esdd data location and ESDD UDAs injected."""
+    task = task_binary()
+    if not task:
+        die("taskwarrior 'task' binary not found on PATH. Install "
+            "taskwarrior (https://taskwarrior.org) or proceed with "
+            "markdown-only planning and track tasks by hand.")
+    cmd = [task, f"rc.data.location={root / ESDD_DIR / 'tasks'}", *UDA_OVERRIDES]
+    if batch:
+        cmd += ["rc.confirmation=no", "rc.recurrence.confirmation=no"]
+    cmd += list(args)
+    return subprocess.call(cmd)
+
+
+def task_json(root, filters=()):
+    """`task export` parsed to a list of dicts."""
+    task = task_binary()
+    if not task:
+        die("taskwarrior 'task' binary not found on PATH; cannot query tasks.")
+    # note: repeated `status:X` filters AND together in taskwarrior; the
+    # parenthesized `or` expression is the correct way to union them
+    cmd = [task, f"rc.data.location={root / ESDD_DIR / 'tasks'}",
+           *UDA_OVERRIDES,
+           "(", "status:pending", "or", "status:waiting", "or",
+           "status:in-progress", "or", "status:completed", ")",
+           *filters, "export"]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        die(f"task export failed: {res.stderr.strip()}")
+    try:
+        return json.loads(res.stdout or "[]")
+    except json.JSONDecodeError as e:
+        die(f"could not parse task export: {e}")
+
+
+def spec_tasks(tasks, slug):
+    """Tasks whose Taskwarrior project leaf is the spec slug."""
+    return [t for t in tasks
+            if (t.get("project") or "").split(".")[-1] == slug]
+
+
+def dep_uuids(task):
+    d = task.get("depends") or []
+    if isinstance(d, str):
+        d = [x for x in d.split(",") if x]
+    return d
+
+
+# -------------------------------------------------------------- estimate ---
+
+def estimate_tokens(root, patterns):
+    """chars/4 + per-file overhead. Returns (tokens, files, missing)."""
+    files = []
+    missing = []
+    for pat in patterns:
+        pat = pat.strip()
+        if not pat:
+            continue
+        matches = [p for p in glob.glob(str(root / pat), recursive=True)
+                   if Path(p).is_file()]
+        if matches:
+            files.extend(matches)
+        else:
+            missing.append(pat)
+    files = sorted(set(files))
+    chars = 0
+    for f in files:
+        try:
+            chars += len(Path(f).read_text(errors="replace"))
+        except OSError:
+            missing.append(f)
+    tokens = chars // 4 + PER_FILE_OVERHEAD * len(files)
+    return tokens, files, missing
+
+
+def verdict_for(tokens):
+    if tokens <= SOFT_LIMIT:
+        return "ok"
+    if tokens <= HARD_LIMIT:
+        return "SPLIT"
+    return "HARD-STOP"
+
+
+# -------------------------------------------------------------- env/state ---
+
+def env_path(root):
+    return root / ESDD_DIR / "env"
+
+
+def read_env(root):
+    env = {}
+    p = env_path(root)
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
+
+
+def write_env(root, env):
+    lines = [f"{k}={v}" for k, v in sorted(env.items())]
+    env_path(root).write_text("\n".join(lines) + "\n")
+
+
+def state_path(root):
+    return root / ESDD_DIR / "state.json"
+
+
+def read_state(root):
+    p = state_path(root)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            warn("state.json is corrupt; starting fresh")
+    return {"current_phase": None, "completed": [], "spec": None}
+
+
+def write_state(root, state):
+    state_path(root).write_text(json.dumps(state, indent=2) + "\n")
+
+
+# ------------------------------------------------------------------- init ---
+
+def cmd_init(a):
+    root = Path.cwd().resolve()
+    esdd = root / ESDD_DIR
+    for d in ("adrs", "tasks", "specs"):
+        (esdd / d).mkdir(parents=True, exist_ok=True)
+
+    nav = a.graph_nav or "unconfigured"
+    if not env_path(root).exists():
+        write_env(root, {"GRAPH_NAV": nav})
+
+    if not state_path(root).exists():
+        write_state(root, {"current_phase": None, "completed": [], "spec": None})
+
+    shared = esdd / "design.md"
+    if not shared.exists() and assets_path("design-shared-template.md"):
+        render_template("design-shared-template.md",
+                        {"WORKSPACE": workspace_name(root), "DATE": date.today()},
+                        shared)
+
+    out(f"initialised {esdd}/")
+    out("")
+    out("  .esdd/")
+    out("  ├── adrs/        directory-level MADR ADRs (team conventions)")
+    out("  ├── tasks/       Taskwarrior data location")
+    out("  ├── specs/       one directory per feature spec")
+    out("  ├── design.md    shared C4 System Context + Container views")
+    out("  ├── env          configuration (GRAPH_NAV)")
+    out("  └── state.json   phase tracker")
+    out("")
+    if nav == "unconfigured":
+        out("NEXT - ask the human (Phase 0 graph-navigation question):")
+        out('  "Which code-navigation aid should ESDD use? '
+            'codegraph | graphify | falkordb | neo4j | custom | none"')
+        out("Then: esdd env set GRAPH_NAV <choice>")
+    else:
+        out(f"GRAPH_NAV={nav}")
+    out("")
+    out("Global ADRs (Level 1) live at ~/.esdd/adrs and apply to every "
+        "workspace; create them with: esdd adr new --level global")
+
+
+# ----------------------------------------------------------------- doctor ---
+
+def cmd_doctor(a):
+    root = find_root(a.root)
+    out(f"workspace root: {root} (.esdd found)")
+    task = task_binary()
+    if task:
+        ver = subprocess.run([task, "--version"], capture_output=True,
+                             text=True).stdout.strip().splitlines()
+        out(f"taskwarrior:     {ver[0] if ver else task}")
+    else:
+        out("taskwarrior:     NOT FOUND (markdown-only mode)")
+    data = root / ESDD_DIR / "tasks"
+    out(f"data location:   {data} "
+        f"({'writable' if os.access(data, os.W_OK) else 'NOT WRITABLE'})")
+    env = read_env(root)
+    out(f"GRAPH_NAV:       {env.get('GRAPH_NAV', 'unset')}")
+    state = read_state(root)
+    out(f"phase:           {state.get('current_phase') or '-'} "
+        f"(completed: {', '.join(state.get('completed', [])) or '-'})")
+    g = Path.home() / ESDD_DIR / "adrs"
+    out(f"global ADRs:     {g} ({len(list(g.glob('*.md'))) if g.is_dir() else 0} files)")
+
+
+# -------------------------------------------------------------------- env ---
+
+def cmd_env(a):
+    root = find_root(a.root)
+    env = read_env(root)
+    if a.unset:
+        env.pop(a.unset, None)
+        write_env(root, env)
+        out(f"unset {a.unset}")
+        return
+    if a.value is None and a.key is None:
+        for k, v in sorted(env.items()):
+            out(f"{k}={v}")
+        return
+    if a.value is None:
+        if a.key not in env:
+            die(f"key '{a.key}' not set")
+        out(f"{a.key}={env[a.key]}")
+        return
+    if a.key == "GRAPH_NAV" and a.value not in GRAPH_NAV_CHOICES + ["unconfigured"]:
+        die(f"GRAPH_NAV must be one of: {', '.join(GRAPH_NAV_CHOICES)}")
+    env[a.key] = a.value
+    write_env(root, env)
+    out(f"{a.key}={a.value}")
+
+
+# ---------------------------------------------------------------------- tw ---
+
+def cmd_tw(a):
+    root = find_root(a.root)
+    args = list(a.args)
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        die("pass task arguments after '--', e.g.: esdd tw -- next")
+    sys.exit(run_task(root, args, batch=a.batch))
+
+
+# --------------------------------------------------------------------- spec ---
+
+def cmd_spec_new(a):
+    root = find_root(a.root)
+    check_slug(a.slug)
+    sdir = root / ESDD_DIR / "specs" / a.slug
+    if sdir.exists() and any(sdir.iterdir()) and not a.force:
+        die(f"spec '{a.slug}' already exists at {sdir} (use --force to rescaffold)")
+    (sdir / "diagrams").mkdir(parents=True, exist_ok=True)
+    (sdir / "adrs").mkdir(exist_ok=True)
+
+    mapping = {"SLUG": a.slug, "TITLE": a.title or a.slug.replace("-", " ").title(),
+               "DATE": date.today(), "PROJECT": a.project,
+               "WORKSPACE": workspace_name(root),
+               "FULL_PROJECT": f"{workspace_name(root)}.{a.project}.{a.slug}"}
+    for tpl, name in [("proposal-template.md", "proposal.md"),
+                      ("design-template.md", "design.md"),
+                      ("utility-tree-template.md", "utility-tree.md")]:
+        if assets_path(tpl):
+            render_template(tpl, mapping, sdir / name)
+
+    out(f"spec '{a.slug}' scaffolded at {sdir}/")
+    out(f"Taskwarrior project: {mapping['FULL_PROJECT']}")
+
+    if not a.no_index:
+        proj = mapping["FULL_PROJECT"]
+        if task_binary():
+            run_task(root, ["add", f"{a.slug} :: spec index",
+                            f"project:{proj}", "+spec", 'adrs:""'], batch=True)
+            created = task_json(root, [f"project:{proj}", "+spec"])
+            if created:
+                newest = max(created, key=lambda t: t.get("entry_ts", ""))
+                run_task(root, [newest["uuid"], "annotate",
+                                f"Spec dir: {ESDD_DIR}/specs/{a.slug}/ - "
+                                "proposal.md, design.md, utility-tree.md. "
+                                "Keep the adrs UDA in sync with adrs/*.md."],
+                         batch=True)
+                out(f"index task created: {newest.get('id')} (uuid {newest['uuid'][:8]}...)")
+        else:
+            out("taskwarrior not found - create the index task later with:")
+            out(f"  esdd tw -- add '{a.slug} :: spec index' "
+                f"project:{proj} +spec 'adrs:\"\"'")
+    out("")
+    out("Next: esdd phase product --spec " + a.slug)
+
+
+def cmd_spec_list(a):
+    root = find_root(a.root)
+    specs_dir = root / ESDD_DIR / "specs"
+    if not specs_dir.is_dir():
+        die(f"no specs directory at {specs_dir}")
+    rows = []
+    for d in sorted(specs_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        marks = []
+        for f, label in [("proposal.md", "P"), ("utility-tree.md", "U"),
+                         ("design.md", "D")]:
+            p = d / f
+            marks.append(label if p.exists() and len(p.read_text()) > 200 else "-")
+        rows.append((d.name, "".join(marks), len(list((d / "adrs").glob("*.md")))))
+    if not rows:
+        out("no specs yet - create one with: esdd spec new <slug> --project <proj>")
+        return
+    out("| spec | P=proposal U=utility-tree D=design | spec ADRs |")
+    out("|------|------------------------------------|-----------|")
+    for name, marks, nadrs in rows:
+        out(f"| {name} | {marks} | {nadrs} |")
+
+
+# ---------------------------------------------------------------------- adr ---
+
+def adr_dirs(root, spec=None):
+    dirs = {"global": Path.home() / ESDD_DIR / "adrs",
+            "directory": root / ESDD_DIR / "adrs",
+            "spec": root / ESDD_DIR / "specs" / spec / "adrs" if spec else None}
+    return dirs
+
+
+def next_adr_number(adir):
+    nums = [int(m.group(1)) for f in adir.glob("*.md")
+            if (m := re.match(r"(\d{4})-", f.name))]
+    return max(nums, default=0) + 1
+
+
+def cmd_adr_new(a):
+    check_slug(slugify(a.title), "title slug")
+    if a.level == "spec":
+        if not a.spec:
+            die("--spec is required for --level spec")
+        check_slug(a.spec)
+    root = find_root(a.root)
+    adir = adr_dirs(root, a.spec)[a.level]
+    adir.mkdir(parents=True, exist_ok=True)
+    n = next_adr_number(adir)
+    slug = slugify(a.title)
+    path = adir / f"{n:04d}-{slug}.md"
+    render_template("adr-template.md",
+                    {"NNNN": f"{n:04d}", "TITLE": a.title, "DATE": date.today()},
+                    path)
+    out(f"created {a.level} ADR: {path}")
+    if a.level == "spec":
+        out("remember to add the entry to the spec index task:")
+        out(f'  esdd tw -- <index-task-uuid> modify adrs:"<existing>,{n:04d}-{slug}"')
+
+
+def cmd_adr_list(a):
+    root = find_root(a.root)
+    levels = [a.level] if a.level else ["spec", "directory", "global"]
+    shown = False
+    for level in levels:
+        if level == "spec":
+            if a.spec:
+                spec_dirs = [root / ESDD_DIR / "specs" / a.spec]
+            else:
+                specs = root / ESDD_DIR / "specs"
+                spec_dirs = sorted(d for d in specs.iterdir() if d.is_dir()) \
+                    if specs.is_dir() else []
+            for sd in spec_dirs:
+                adir = sd / "adrs"
+                if not adir.is_dir() or not any(adir.glob("*.md")):
+                    continue
+                shown = True
+                out(f"[spec:{sd.name}] {adir}")
+                for line in adr_file_lines(adir):
+                    out(f"  {line}")
+                out("")
+            continue
+        adir = adr_dirs(root)[level]
+        if not adir or not adir.is_dir() or not any(adir.glob("*.md")):
+            continue
+        shown = True
+        out(f"[{level}] {adir}")
+        for line in adr_file_lines(adir):
+            out(f"  {line}")
+        out("")
+    if not shown:
+        out("no ADRs found at any level")
+
+
+def adr_file_lines(adir):
+    rows = []
+    for f in sorted(adir.glob("*.md")):
+        text = f.read_text(errors="replace")
+        tm = re.search(r"^#\s+\d+\.\s+(.+)$", text, re.M)
+        sm = re.search(r"^##\s*Status\s*\n\s*(\S+)", text, re.M)
+        title = tm.group(1).strip() if tm else f.stem
+        status = sm.group(1).strip() if sm else "?"
+        rows.append(f"{f.stem}  [{status}]  {title}")
+    return rows or ["(none)"]
+
+
+# ------------------------------------------------------------------- matrix ---
+
+def build_graph(tasks):
+    by_uuid = {t["uuid"]: t for t in tasks if t.get("uuid")}
+    deps = {u: [d for d in dep_uuids(t) if d in by_uuid]
+            for u, t in by_uuid.items()}
+    return by_uuid, deps
+
+
+def find_cycles(deps):
+    color, stack, cycles = {}, [], []
+
+    def dfs(u):
+        color[u] = 1
+        stack.append(u)
+        for v in deps.get(u, []):
+            if color.get(v, 0) == 1:
+                cycles.append(stack[stack.index(v):] + [v])
+            elif color.get(v, 0) == 0:
+                dfs(v)
+        stack.pop()
+        color[u] = 2
+
+    for u in list(deps):
+        if color.get(u, 0) == 0:
+            dfs(u)
+    return cycles
+
+
+def cmd_matrix(a):
+    root = find_root(a.root)
+    tasks = task_json(root)
+    if a.spec:
+        tasks = spec_tasks(tasks, a.spec)
+    if not tasks:
+        out("no tasks found.")
+        return
+    by_uuid, deps = build_graph(tasks)
+    blocks = {u: [] for u in by_uuid}
+    for u, ds in deps.items():
+        for d in ds:
+            blocks[d].append(u)
+    tids = {u: str(t.get("id", "?")) for u, t in by_uuid.items()}
+
+    def label(u):
+        desc = (by_uuid[u].get("description") or "")[:48]
+        return f"{tids[u]}:{desc}"
+
+    lines = []
+    lines.append(f"| Task | Project | Depends on (blocked by) | Blocks |")
+    lines.append("|------|---------|--------------------------|--------|")
+    for t in sorted(tasks, key=lambda x: (x.get("project") or "", x.get("id") or 0)):
+        u = t.get("uuid")
+        dep = ", ".join(tids.get(d, d[:8]) for d in deps.get(u, [])) or "-"
+        blk = ", ".join(tids.get(b, b[:8]) for b in blocks.get(u, [])) or "-"
+        lines.append(f"| {tids[u]}: {(t.get('description') or '')[:48]} "
+                     f"| {t.get('project') or '-'} | {dep} | {blk} |")
+    cycles = find_cycles(deps)
+    for cyc in cycles:
+        lines.append("")
+        lines.append(f"WARNING dependency cycle: "
+                     f"{' -> '.join(tids.get(u, u[:8]) for u in cyc)}")
+    text = "\n".join(lines) + "\n"
+    if a.out:
+        Path(a.out).write_text(text)
+        out(f"matrix written to {a.out} ({len(tasks)} tasks, {len(cycles)} cycles)")
+    else:
+        out(text)
+
+
+# ----------------------------------------------------------------- estimate ---
+
+def cmd_estimate(a):
+    root = find_root(a.root)
+    tasks = task_json(root)
+    if a.spec:
+        tasks = spec_tasks(tasks, a.spec)
+    if not a.all:
+        tasks = [t for t in tasks if t.get("touches")]
+    if not tasks:
+        out("no tasks with a touches UDA found.")
+        return
+    rows = []
+    for t in sorted(tasks, key=lambda x: x.get("id") or 0):
+        patterns = (t.get("touches") or "").split(",")
+        tokens, files, missing = estimate_tokens(root, patterns)
+        v = verdict_for(tokens)
+        rows.append((t, tokens, len(files), missing, v))
+        if a.set and t.get("uuid"):
+            run_task(root, [t["uuid"], "modify", f"token_estimate:{tokens}"],
+                     batch=True)
+    out("| Task | Files | Est. tokens | Verdict | Missing globs |")
+    out("|------|-------|-------------|---------|---------------|")
+    for t, tokens, nf, missing, v in rows:
+        flag = "" if v == "ok" else "  <<<"
+        out(f"| {t.get('id')}: {(t.get('description') or '')[:44]} "
+            f"| {nf} | {tokens:,} | {v}{flag} | {', '.join(missing) or '-'} |")
+    out("")
+    out(f"budget: ok <= {SOFT_LIMIT:,} | SPLIT <= {HARD_LIMIT:,} | "
+        f"above = HARD-STOP (needs human sign-off)")
+    if a.set:
+        out("token_estimate UDA written back to tasks.")
+
+
+# ------------------------------------------------------------------ verify ---
+
+def cmd_verify(a):
+    root = find_root(a.root)
+    check_slug(a.spec)
+    sdir = root / ESDD_DIR / "specs" / a.spec
+    if not sdir.is_dir():
+        die(f"no spec directory at {sdir}")
+    tasks = spec_tasks(task_json(root), a.spec)
+    failures, notes = [], []
+
+    index = [t for t in tasks if "spec" in (t.get("tags") or [])]
+    index_uuids = {t["uuid"] for t in index}
+    if len(index) != 1:
+        failures.append(f"expected exactly 1 index task (+spec), found {len(index)}")
+        index = index[:1]
+    else:
+        adr_files = {f.stem for f in (sdir / "adrs").glob("*.md")}
+        entries = {e.strip() for e in (index[0].get("adrs") or "").split(",") if e.strip()}
+        missing_files = sorted(entries - adr_files)
+        unlisted = sorted(adr_files - entries)
+        if missing_files:
+            failures.append(f"index task adrs UDA lists files that do not exist: "
+                            f"{', '.join(missing_files)}")
+        if unlisted:
+            notes.append(f"ADR files not listed in index task adrs UDA: "
+                         f"{', '.join(unlisted)}")
+
+    by_uuid = {t["uuid"]: t for t in tasks if t.get("uuid")}
+    dangling = [(t, d) for t in tasks for d in dep_uuids(t)
+                if d not in by_uuid]
+    for t, d in dangling:
+        failures.append(f"task {t.get('id')} depends on unknown uuid {d[:8]}")
+
+    _, deps = build_graph(tasks)
+    for cyc in find_cycles(deps):
+        failures.append("dependency cycle: " +
+                        " -> ".join(str(by_uuid[u].get("id", "?")) for u in cyc))
+
+    for t in tasks:
+        if t.get("uuid") in index_uuids:
+            continue
+        tid = t.get("id")
+        est = t.get("token_estimate")
+        if not est and t.get("touches"):
+            est, _, _ = estimate_tokens(root, (t.get("touches") or "").split(","))
+            notes.append(f"task {tid} has touches but no persisted token_estimate "
+                         f"(computed {est:,}; run esdd estimate --set)")
+        if not est:
+            failures.append(f"task {tid} '{(t.get('description') or '')[:40]}' "
+                            f"has neither token_estimate nor touches")
+        elif est > HARD_LIMIT and not any(
+                "HARDCAP-APPROVED" in (a.get("description") or "")
+                for a in (t.get("annotations") or [])):
+            failures.append(f"task {tid} estimate {est:,} exceeds hard limit "
+                            f"{HARD_LIMIT:,} without HARDCAP-APPROVED sign-off")
+        if not t.get("worker"):
+            notes.append(f"task {tid} has no worker UDA (defaults to agent)")
+
+    out(f"verify spec '{a.spec}':")
+    for n in notes:
+        out(f"  note:  {n}")
+    if not failures:
+        out("  PASS - handoff gate clear")
+    for f in failures:
+        out(f"  FAIL:  {f}")
+
+    human = [t for t in tasks
+             if t.get("worker") == "human" and t.get("status") in ("pending", "waiting")]
+    if human:
+        out("")
+        out("human work order:")
+        for t in human:
+            brief = ""
+            if t.get("annotations"):
+                brief = " ".join(t["annotations"][0].get("description", "").split())[:100]
+            out(f"  [{t.get('id')}] {t.get('description')}")
+            if brief:
+                out(f"        {brief}")
+    sys.exit(1 if failures else 0)
+
+
+# ------------------------------------------------------------------- phase ---
+
+def cmd_phase(a):
+    root = find_root(a.root)
+    state = read_state(root)
+    if not a.name:
+        out(f"current phase: {state.get('current_phase') or '-'}")
+        out(f"active spec:   {state.get('spec') or '-'}")
+        out(f"completed:     {', '.join(state.get('completed', [])) or '-'}")
+        out("phases: " + ", ".join(PHASES))
+        return
+    if a.name not in PHASES:
+        die(f"unknown phase '{a.name}' (choose: {', '.join(PHASES)})")
+    slug = a.spec or state.get("spec")
+    if not slug:
+        die("spec required: esdd phase <name> --spec <slug>")
+    missing = [r.format(s=slug) for r in PHASES[a.name]["requires"]
+               if not (root / ESDD_DIR / r.format(s=slug)).exists()]
+    if missing:
+        warn(f"phase '{a.name}' is missing prerequisites: {', '.join(missing)}")
+    if a.done:
+        done = state.setdefault("completed", [])
+        if a.name not in done:
+            done.append(a.name)
+    state["current_phase"] = a.name
+    state["spec"] = slug
+    write_state(root, state)
+    out(f"phase '{a.name}' active for spec '{slug}'"
+        + (" (marked done)" if a.done else ""))
+    skill_dir = SCRIPT_DIR.parent
+    for ref in PHASES[a.name]["refs"]:
+        out(f"  read: {skill_dir / ref}")
+    if missing:
+        out("  prerequisites missing - resolve them before proceeding")
+
+
+# -------------------------------------------------------------------- main ---
+
+def main():
+    p = argparse.ArgumentParser(prog="esdd", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--root", help="workspace root containing .esdd "
+                                  "(default: nearest parent with .esdd)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pi = sub.add_parser("init", help="scaffold .esdd/ here")
+    pi.add_argument("--graph-nav", choices=GRAPH_NAV_CHOICES,
+                    help="write this choice into .esdd/env immediately")
+    pi.set_defaults(fn=cmd_init)
+
+    pd = sub.add_parser("doctor", help="check installation and workspace")
+    pd.set_defaults(fn=cmd_doctor)
+
+    pe = sub.add_parser("env", help="read/write .esdd/env")
+    pe.add_argument("key", nargs="?")
+    pe.add_argument("value", nargs="?")
+    pe.add_argument("--unset")
+    pe.set_defaults(fn=cmd_env)
+
+    ptw = sub.add_parser("tw", help="run task(1) against nearest .esdd/tasks")
+    ptw.add_argument("--batch", action="store_true",
+                     help="disable confirmation prompts (scripts)")
+    ptw.add_argument("args", nargs=argparse.REMAINDER)
+    ptw.set_defaults(fn=cmd_tw)
+
+    ps = sub.add_parser("spec", help="manage specs")
+    sp = ps.add_subparsers(dest="scmd", required=True)
+    psn = sp.add_parser("new", help="scaffold .esdd/specs/<slug>/ + index task")
+    psn.add_argument("slug")
+    psn.add_argument("--project", default="core",
+                     help="middle project segment (default: core)")
+    psn.add_argument("--title", help="human-readable title")
+    psn.add_argument("--no-index", action="store_true",
+                     help="skip creating the Taskwarrior index task")
+    psn.add_argument("--force", action="store_true")
+    psn.set_defaults(fn=cmd_spec_new)
+    psl = sp.add_parser("list", help="list specs and artifact status")
+    psl.set_defaults(fn=cmd_spec_list)
+
+    pa = sub.add_parser("adr", help="manage MADR ADRs (3 levels)")
+    ap = pa.add_subparsers(dest="acmd", required=True)
+    pan = ap.add_parser("new")
+    pan.add_argument("--level", required=True,
+                     choices=["global", "directory", "spec"])
+    pan.add_argument("--title", required=True)
+    pan.add_argument("--spec", help="spec slug (required for --level spec)")
+    pan.set_defaults(fn=cmd_adr_new)
+    pal = ap.add_parser("list")
+    pal.add_argument("--level", choices=["global", "directory", "spec"])
+    pal.add_argument("--spec")
+    pal.set_defaults(fn=cmd_adr_list)
+
+    pm = sub.add_parser("matrix", help="blocking-edge matrix from task export")
+    pm.add_argument("--spec")
+    pm.add_argument("--out", help="write markdown to this file")
+    pm.set_defaults(fn=cmd_matrix)
+
+    pe2 = sub.add_parser("estimate", help="token estimates from touches UDA")
+    pe2.add_argument("--spec")
+    pe2.add_argument("--all", action="store_true",
+                     help="also list tasks without touches")
+    pe2.add_argument("--set", action="store_true",
+                     help="write token_estimate back to tasks")
+    pe2.set_defaults(fn=cmd_estimate)
+
+    pv = sub.add_parser("verify", help="handoff gate for a spec")
+    pv.add_argument("--spec", required=True)
+    pv.set_defaults(fn=cmd_verify)
+
+    pp = sub.add_parser("phase", help="track workflow phases")
+    pp.add_argument("name", nargs="?", choices=list(PHASES))
+    pp.add_argument("--spec")
+    pp.add_argument("--done", action="store_true", help="mark phase completed")
+    pp.set_defaults(fn=cmd_phase)
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

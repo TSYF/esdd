@@ -1,0 +1,3 @@
+# ESDD environment configuration - read at session start.
+# GRAPH_NAV: codegraph | graphify | falkordb | neo4j | custom | none
+GRAPH_NAV=unconfigured
