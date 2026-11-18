@@ -1,50 +1,66 @@
-# INVEST — product grilling (Phase 1)
+# INVEST — ticket refinement (ticket creation: ADD Step 5, re-checked Phase 6)
 
-INVEST is the checklist every user story must pass before it enters the
-utility tree. Two letters matter most for ESDD's agentic workflow:
+INVEST belongs at **ticket time**, not product time. Stories may arrive
+from Phase 1 big and coupled — that is fine; they described outcomes.
+Before design work becomes dispatchable work, it is refined into tickets
+that each fit one agent context. Two letters matter most for ESDD:
 
-- **Independent** — independent stories decompose into tasks whose blocking
-  edges are few, so multiple agents can work in parallel. A story that can
-  only be done "after that other one" is one task chain, not a story.
+- **Independent** — independent tickets have few `depends` edges, so
+  multiple agents work in parallel. A ticket that can only start "after
+  that other one" is a chain link, not a ticket.
 - **Small** — smallness is the token budget's first line of defence. If a
-  story can't produce tasks under 100k tokens, the story is too big.
+  ticket can't stay under 100k tokens, it's too big, full stop.
 
-## Grilling protocol
+## When this runs
 
-Interview the human. One letter at a time, worst-gap first. For each story:
+- **ADD Step 5**, per iteration batch, as the batch is decomposed into
+  Taskwarrior tickets.
+- **Phase 6 handoff**, re-checked as a gate: `esdd verify` catches
+  estimates and cycles; this checklist catches the rest.
 
-1. **Independent** — "What does this story need from other stories to be
-   useful? What breaks if we ship this one alone?" If the answer names
-   another story, merge or split.
-2. **Negotiable** — "Which part of this story would you trade away if the
-   architecture made it expensive?" If nothing is negotiable, the story is
-   a constraint, not a story — move it to Constraints.
-3. **Valuable** — "What changes for the user when this ships? How do we
-   observe it?" If the answer is "the codebase is cleaner", it is a
-   refactoring task, not a story. Demote it.
-4. **Estimable** — "How would we know this is 2 days vs 2 weeks?" If the
-   human can't say, keep grilling: unknown size = unknown scope.
-5. **Small** — "Can one agent hold everything this story touches in one
-   context?" Rough ceiling: ~6 files, ~1200 LOC touched (see
-   token-budget.md). Bigger → split vertically by acceptance criterion,
+## The checklist, per ticket
+
+1. **Independent** — "What does this ticket need from other tickets to
+   be startable? What breaks if it runs alone?" If the answer names
+   another ticket, merge or split. Cross-ticket knowledge requirements
+   become explicit `depends` edges — never implicit assumptions.
+2. **Negotiable** — "Which part would you trade away if the architecture
+   made it expensive?" If nothing is negotiable, it's a constraint:
+   move it to design.md Constraints and re-slice the ticket.
+3. **Valuable** — "What changes for the user when this ships?" If the
+   answer is "the codebase is cleaner", it's a refactoring task: demote
+   it to a subtask of the ticket whose value it protects, or drop it.
+4. **Estimable** — `esdd estimate --spec <slug> --set` computes from
+   `touches` (see token-budget.md). Unknown size = unknown scope; keep
+   grilling before dispatch. Uncertainty work present? See
+   execution.md rule 1 (spike-first) and rule 6 (calibration).
+5. **Small** — one agent context: rough ceiling ~6 files, ~1200 LOC,
+   ≤100k tokens. Bigger → split **vertically by acceptance criterion**,
    not horizontally by layer.
-6. **Testable** — "Give me the Given/When/Then." No testable criterion, no
-   story. The Verify step of every downstream task brief comes from here.
+6. **Testable** — every ticket's brief carries a `Verify` and a
+   `Done when` derived from the **originating story's GWT scenario**
+   (proposal.md). A ticket that cannot name its GWT scenario means the
+   story was never finished — send it back to proposal.md, don't invent
+   a verification.
 
-## Output discipline
+## Splitting strategies (when I or S fails)
 
-- Every story has ≥1 acceptance criterion in Given/When/Then form.
-- Fill the INVEST table in `proposal.md`; any cell that isn't ✓ gets a
-  one-line note saying why, and what will fix it.
-- The grilling is done when **Open Questions** is empty. Do not proceed to
-  QAW with open product questions — ASRs derived from mush are mush.
-- Draft the proposal in a subagent (see SKILL.md "Sub-agent briefs"), then
-  read it back to the human for sign-off before writing `proposal.md`.
-
-## Splitting strategies (when S or I fails)
-
-- **By acceptance criterion** — each criterion becomes its own story.
+- **By acceptance criterion / GWT scenario** — each scenario becomes its
+  own ticket. Best profile: the scenarios share state, so order the
+  `depends` edges accordingly.
 - **By user role** — admin flow vs. self-serve flow.
 - **By outcome** — "view the report" vs. "export the report".
-Never split by layer ("frontend story", "backend story") — those have the
-worst blocking-edge profiles and the least independent value.
+
+Never split by layer ("frontend ticket", "backend ticket") — those have
+the worst blocking-edge profiles and the least independent value.
+Morphology-based splits (decision / harness / deliverable) are covered in
+references/execution.md rule 2 and are the tool of choice for tickets
+that are *technically* one outcome but *cognitively* three loops.
+
+## Token-budget splits
+
+For tickets whose `token_estimate` verdict is SPLIT (100k–140k) or
+HARD-STOP (>140k), follow references/token-budget.md: split along
+interfaces pinned in design.md, re-estimate, re-run matrix. Human
+sign-off via a `HARDCAP-APPROVED` annotation is the only way a >140k
+ticket survives the gate.

@@ -1,6 +1,6 @@
 ---
 name: esdd
-description: Exhaustive Spec-Driven Development (ESDD) — grill the user into an INVEST-checked product spec, derive quality attributes via QAW and a ranked utility tree, design the architecture with Attribute-Driven Design, stress-test it with ATAM, and decompose everything into a Taskwarrior task graph with C4 + PlantUML diagrams and three-level MADR ADRs, where every task is sized under a 100k-token budget and assigned to an agent or a human. Use this skill whenever the user mentions ESDD or "exhaustive spec-driven development", asks for a "spec", "proposal", or "design doc" for a feature, wants a feature broken into tasks/tickets for agents, mentions INVEST, QAW, utility tree, ADD, ATAM, ADRs, Taskwarrior-based planning, or wants a feature's architecture planned thoroughly before coding — even if they never say "ESDD".
+description: Exhaustive Spec-Driven Development (ESDD) — grill the user into a product spec whose stories carry Given/When/Then acceptance scenarios and an Impact Map, derive quality attributes via QAW and a ranked utility tree, design the architecture with Attribute-Driven Design, stress-test it with ATAM, and decompose into INVEST-refined Taskwarrior tickets with C4 + PlantUML diagrams and three-level MADR ADRs, where every ticket is sized under a 100k-token budget and assigned to an agent or a human. Use this skill whenever the user mentions ESDD or "exhaustive spec-driven development", asks for a "spec", "proposal", or "design doc" for a feature, wants a feature broken into tasks/tickets for agents, mentions INVEST, impact mapping, given-when-then, QAW, utility tree, ADD, ATAM, ADRs, Taskwarrior-based planning, or wants a feature's architecture planned thoroughly before coding — even if they never say "ESDD".
 ---
 
 # ESDD — Exhaustive Spec-Driven Development
@@ -15,7 +15,7 @@ through sub-agents so the orchestrator's context stays lean.
 
 ```
 .esdd/specs/<slug>/
-├── proposal.md       product spec, INVEST-checked      (Phase 1)
+├── proposal.md       product spec: GWT scenarios + impact map (Phase 1)
 ├── utility-tree.md   drivers, ASRs, ranked QAS          (Phases 2–3)
 ├── design.md         ADD architecture + ATAM findings   (Phases 4–5)
 ├── diagrams/*.puml   C4 + sequence/class/activity/state/ER
@@ -47,12 +47,16 @@ Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
    project separator).
 6. **Interfaces before tasks**: a design.md Interface entry exists before
    any task touching it is created.
+7. **GWT is the contract**: every story enters proposal.md only with a
+   Given/When/Then scenario; every ticket's `Verify`/`Done when` derives
+   from the scenario it implements. A ticket that cannot name its
+   originating scenario goes back to proposal.md — never invent one.
 
 ## CLI quick reference (`esdd`, in `scripts/` of this skill)
 
 | Command | Purpose |
 |---------|---------|
-| `esdd init [--graph-nav X]` | scaffold `.esdd/`; X ∈ codegraph, graphify, falkordb, neo4j, custom, none |
+| `esdd init [--graph-nav X]` | scaffold `.esdd/`; X ∈ codegraph, graphify, falkordb, neo4j, understand, groma, custom, none |
 | `esdd doctor` | check workspace, taskwarrior, env |
 | `esdd env set GRAPH_NAV X` | configure code navigation aid |
 | `esdd tw -- <args>` | task(1) against nearest `.esdd/tasks` (with UDAs injected) |
@@ -60,10 +64,11 @@ Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
 | `esdd spec list` | specs and artifact status |
 | `esdd adr new --level global\|directory\|spec --title "T"` | MADR ADR with correct numbering |
 | `esdd adr list` | all three levels with status |
+| `esdd import --source S --path P` | cache a graph/nav source's output under `.esdd/graph/S/` (options: `--list-sources`, `--snapshot`, `--notes`) |
 | `esdd matrix --spec <slug> [--out f]` | blocking-edge matrix + cycle detection |
 | `esdd estimate --spec <slug> [--set]` | token estimates from `touches` |
 | `esdd verify --spec <slug>` | handoff gate |
-| `esdd phase <name> --spec <slug> [--done]` | track phase; names: product, qaw, tree, add, atam, handoff |
+| `esdd phase <name> --spec <slug> [--done]` | track phase; names: product, qaw, tree, add, atam, handoff, retro |
 
 ## Workflow
 
@@ -85,13 +90,19 @@ Phases run standalone: entering at any phase is fine if its inputs exist
   must cite them.
 - Read the shared `.esdd/design.md` if it exists (C4 Level 1–2 boundary).
 
-### Phase 1 — Product (INVEST)
+### Phase 1 — Product (Given/When/Then + Impact Mapping)
 
 1. `esdd spec new <slug> --project <proj>` (derive slug and project from
    the human's ask; confirm both).
-2. Grill the human per `references/invest.md` until proposal.md's Open
-   Questions section is empty. This is the longest human loop in ESDD —
-   do not rush it; every later phase inherits its precision.
+2. Grill the human per `references/product.md` — in order: goals, actors,
+   impacts, stories. Every story is written down **only with at least one
+   Given/When/Then scenario**; then walk the Impact Map
+   (goal → actor → impact → deliverable) until every row traces.
+   Exit when Open Questions is empty and the map is fully traced. INVEST
+   is deliberately **not** applied here — stories may still be big and
+   coupled; ticket-time refinement owns that (references/invest.md).
+   This is the longest human loop in ESDD — do not rush it; every later
+   phase inherits its precision.
 3. Draft proposal.md in a sub-agent (brief below), present to the human
    for sign-off, then write the file.
 4. `esdd phase product --done --spec <slug>`.
@@ -99,8 +110,12 @@ Phases run standalone: entering at any phase is fine if its inputs exist
 ### Phase 2 — QAW
 
 1. `esdd phase qaw --spec <slug>`; read `references/qaw.md`.
-2. Elicit drivers; brainstorm ASRs with the human (round-robin, capture
-   verbatim, then structure). Exit when the human twice answers "nothing
+2. Seed the brainstorm from the proposal: each **Impact Map row**
+   (goal → actor → impact) is a candidate ASR, and the story **GWT
+   scenarios** already pin the vocabulary — the `When` is a stimulus,
+   the `Given` names the environment, the `Then` is a response seed.
+   Then round-robin hardening ("what makes this fail at 10x?"), capture
+   verbatim, then structure. Exit when the human twice answers "nothing
    missing" to the read-back.
 3. A sub-agent can structure raw notes into the ASR table; the
    brainstorm itself stays with the orchestrator.
@@ -129,8 +144,10 @@ one ranked QAS:
    accepted ADR ⇒ new superseding ADR, old marked `deprecated`.
 5. Instantiate: update design.md (Overview + Interfaces), delegate
    diagrams to a sub-agent, `esdd adr new --level spec` per significant
-   choice, decompose into tasks (batch `task import`, briefs as first
-   annotations, `depends` for blocking edges), refresh
+   choice, refine the iteration's work into **INVEST-clean tickets** per
+   `references/invest.md` and decompose into tasks (batch `task import`,
+   briefs as first annotations with `Verify`/`Done when` derived from the
+   story's GWT, `depends` for blocking edges), refresh
    `esdd matrix --spec <slug> --out matrix.md`, then ask the human which
    tasks they want to own (`worker:human`). Run
    `esdd estimate --spec <slug> --set`.
@@ -154,22 +171,55 @@ Read `references/atam.md`.
 
 ### Phase 6 — Handoff
 
-Read `references/token-budget.md`.
+Read `references/token-budget.md` and `references/invest.md`.
 
-1. `esdd estimate --spec <slug> --set`; split every SPLIT verdict; hard
-   stops need the human's written sign-off in the task's annotations.
-2. `esdd matrix --spec <slug>` — no cycles.
-3. `esdd verify --spec <slug>` must pass: one index task, `adrs` UDA in
+1. **INVEST re-check** (the FDE pass): every ticket Independent, Small,
+   Testable — splits go by GWT scenario (invest.md); token SPLIT/HARD-STOP
+   splits follow token-budget.md along design.md interfaces. Hard stops
+   need the human's written sign-off in the task's annotations.
+2. `esdd estimate --spec <slug> --set`; split every SPLIT verdict.
+3. `esdd matrix --spec <slug>` — no cycles.
+4. `esdd verify --spec <slug>` must pass: one index task, `adrs` UDA in
    sync with files on disk, every actionable task has an estimate and a
    worker, dependencies resolve.
-4. Present the summary: spec list, task counts by status, the blocking-
+5. Present the summary: spec list, task counts by status, the blocking-
    edge critical path, and the **human work order** (their `worker:human`
    tasks). Workable blockers-first: `esdd tw -- next` is the agent queue.
+
+### Retro — documenting an existing repo (standalone, workspace level)
+
+Read `references/retro.md`. Run when the human asks ESDD to adopt a code
+it didn't grow. `esdd phase retro` takes **no `--spec`**. Retro never
+creates proposal.md, QAS, or tasks; its artifacts are the "Technical
+Context" future QAWs read. Token thrift is the phase's governing rule:
+
+1. Confirm the human's `GRAPH_NAV` choice is usable; cache/refresh the
+   snapshot with `esdd import --source <name> --path <tool output>` (for
+   MCP-backed sources, query the MCP, write the normalized snapshot,
+   then register it). Valid cached `snapshot.json` gets element/edge
+   counts printed by the CLI.
+2. Explorer sub-agent sweeps the snapshot → `catalogue.md` (Elements,
+   Boundaries, Interfaces observed, Unresolved). The orchestrator sees
+   only section counts + top-5 claims, never the catalogue body.
+3. Infer ≤8 directory-level MADR ADRs (`esdd adr new --level directory`,
+   status `inferred`, evidence + confidence in Links). Existing accepted
+   ADRs outrank and suppress inferred duplicates. Weak evidence goes to
+   `Unresolved`, never into an ADR.
+4. Diagrammer sub-agent → C4 L1/L2 into `.esdd/design.md` +
+   `specs/_shared/` diagrams, with provenance and per-element confidence.
+5. `esdd phase retro --done`; hand the one-screen report. Corrections
+   from the human are edits to the artifacts — never a re-run.
 
 ## Sub-agent briefs
 
 Two standard briefs cover most delegation. Keep them lean; the whole
 point is context isolation.
+
+**Task dispatch (post-handoff execution)** — read `references/execution.md`
+first: spike-first ticketing, morphology splits, standing workbench
+bootstrap, step-verified reporting, first-red triage (split / spike /
+HUMAN — never blind-retry), estimator calibration. These rules are
+enforced through task annotations and briefs, not remembered.
 
 **Drafter** (proposal sections, QAS drafts, ADR drafts, design.md text):
 

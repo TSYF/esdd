@@ -34,7 +34,8 @@ SOFT_LIMIT = 100_000          # preferred max context per task
 HARD_LIMIT = 140_000          # absolute stop; requires human sign-off
 PER_FILE_OVERHEAD = 1500      # tokens of tooling/path overhead per touched file
 SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-GRAPH_NAV_CHOICES = ["codegraph", "graphify", "falkordb", "neo4j", "custom", "none"]
+GRAPH_NAV_CHOICES = ["codegraph", "graphify", "falkordb", "neo4j",
+                     "understand", "groma", "custom", "none"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ASSETS = SCRIPT_DIR.parent / "assets"
@@ -59,6 +60,9 @@ PHASES = {
         "refs": ["references/token-budget.md", "references/taskwarrior.md"],
         "requires": ["specs/{s}/design.md"],
     },
+    # retro is workspace-level: it takes no spec. It documents an existing
+    # repo into ESDD scaffolding (design.md C4, inferred ADRs, catalogue).
+    "retro": {"refs": ["references/retro.md"], "requires": [], "spec": False},
 }
 
 
@@ -261,7 +265,7 @@ def write_state(root, state):
 def cmd_init(a):
     root = Path.cwd().resolve()
     esdd = root / ESDD_DIR
-    for d in ("adrs", "tasks", "specs"):
+    for d in ("adrs", "tasks", "specs", "graph"):
         (esdd / d).mkdir(parents=True, exist_ok=True)
 
     nav = a.graph_nav or "unconfigured"
@@ -283,6 +287,7 @@ def cmd_init(a):
     out("  ├── adrs/        directory-level MADR ADRs (team conventions)")
     out("  ├── tasks/       Taskwarrior data location")
     out("  ├── specs/       one directory per feature spec")
+    out("  ├── graph/       cached graph/nav snapshots (esdd import)")
     out("  ├── design.md    shared C4 System Context + Container views")
     out("  ├── env          configuration (GRAPH_NAV)")
     out("  └── state.json   phase tracker")
@@ -316,6 +321,10 @@ def cmd_doctor(a):
         f"({'writable' if os.access(data, os.W_OK) else 'NOT WRITABLE'})")
     env = read_env(root)
     out(f"GRAPH_NAV:       {env.get('GRAPH_NAV', 'unset')}")
+    gbase = graph_root(root)
+    sources = sorted(d.name for d in gbase.iterdir() if d.is_dir()) \
+        if gbase.is_dir() else []
+    out(f"graph sources:   {', '.join(sources) or 'none cached'}")
     state = read_state(root)
     out(f"phase:           {state.get('current_phase') or '-'} "
         f"(completed: {', '.join(state.get('completed', [])) or '-'})")
@@ -699,6 +708,129 @@ def cmd_verify(a):
     sys.exit(1 if failures else 0)
 
 
+# ------------------------------------------------------------------- graph ---
+
+def graph_root(root, source=None):
+    base = root / ESDD_DIR / "graph"
+    return base / source if source else base
+
+
+def read_manifest(gdir):
+    p = gdir / "manifest.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        warn(f"corrupt manifest in {gdir}")
+        return None
+
+
+def snapshot_stats(path):
+    """Lightweight check of a normalized snapshot.json: element/edge counts."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(1)
+    if not isinstance(data, dict):
+        raise SystemExit(1)
+    nodes = data.get("elements")
+    edges = data.get("edges")
+    if not isinstance(nodes, list) or not all(isinstance(n, dict) for n in nodes):
+        raise SystemExit(1)
+    if edges is not None and (not isinstance(edges, list)
+                              or not all(isinstance(e, dict) for e in edges)):
+        raise SystemExit(1)
+    return len(nodes), len(edges or [])
+
+
+def cmd_import(a):
+    """Cache a graph/navigation source's output under .esdd/graph/<source>."""
+    root = find_root(a.root)
+    if not a.source and not a.list_sources:
+        die("pass --source <name> (codegraph, graphify, falkordb, neo4j, "
+            "understand, groma, custom, ...) or use --list-sources")
+    if a.list_sources:
+        gbase = graph_root(root)
+        if not gbase.is_dir():
+            out("no graph sources cached (import one with: esdd import "
+                "--source <name> --path <file-or-dir>)")
+            return
+        for d in sorted(gbase.iterdir()):
+            if not d.is_dir():
+                continue
+            man = read_manifest(d) or {}
+            snap = d / "snapshot.json"
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            line = f"{d.name:<14} {size/1024:>8.0f} KiB  imported {man.get('imported', '?')}"
+            if snap.is_file():
+                try:
+                    n, e = snapshot_stats(snap)
+                    line += f"  [{n} elements, {e} edges]"
+                except SystemExit:
+                    line += "  [snapshot.json invalid]"
+            out(line)
+        return
+
+    check_slug(a.source, "source name")
+    gdir = graph_root(root, a.source)
+    gdir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    snap_name = None
+    if a.path:
+        src = Path(a.path).expanduser().resolve()
+        if not src.exists():
+            die(f"path not found: {src}")
+        if src.is_file():
+            dest_name = "snapshot.json" if a.snapshot else src.name
+            dest = gdir / dest_name
+            shutil.copy2(src, dest)
+            copied = [dest.name]
+            if a.snapshot:
+                snap_name = "snapshot.json"
+        else:
+            for f in sorted(src.rglob("*")):
+                if f.is_file():
+                    rel = f.relative_to(src)
+                    dest = gdir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+                    copied.append(str(rel))
+                    if dest.stat().st_size > a.max_file_mb * 1_000_000:
+                        warn(f"{dest.name} is large "
+                             f"({dest.stat().st_size // 1000} KiB); "
+                             "consider summarizing it into snapshot.json before "
+                             "any agent reads it (token budget applies to graphs)")
+        a.path = str(src)
+
+    man = {
+        "source": a.source,
+        "imported": date.today().isoformat(),
+        "origin_path": a.path,
+        "files": copied,
+        "snapshot": snap_name or ("snapshot.json"
+                                  if (gdir / "snapshot.json").is_file() else None),
+        "notes": a.notes or "",
+    }
+    (gdir / "manifest.json").write_text(json.dumps(man, indent=2) + "\n")
+    snap = gdir / "snapshot.json"
+    if snap.is_file():
+        try:
+            n, e = snapshot_stats(snap)
+            out(f"imported source '{a.source}': snapshot.json ok "
+                f"({n} elements, {e} edges)")
+        except SystemExit:
+            out(f"imported source '{a.source}': WARNING snapshot.json is not a "
+                "valid normalized snapshot (see references/retro.md)")
+    else:
+        out(f"imported source '{a.source}': {len(copied)} file(s) cached")
+        if copied:
+            out("NOTE no snapshot.json in cache - normalize one before running "
+                "esdd phase retro (schema in references/retro.md), or re-import "
+                "the file with --snapshot")
+    out(f"cache: {gdir}")
+
+
 # ------------------------------------------------------------------- phase ---
 
 def cmd_phase(a):
@@ -712,11 +844,14 @@ def cmd_phase(a):
         return
     if a.name not in PHASES:
         die(f"unknown phase '{a.name}' (choose: {', '.join(PHASES)})")
-    slug = a.spec or state.get("spec")
-    if not slug:
-        die("spec required: esdd phase <name> --spec <slug>")
-    missing = [r.format(s=slug) for r in PHASES[a.name]["requires"]
-               if not (root / ESDD_DIR / r.format(s=slug)).exists()]
+    if not PHASES[a.name].get("spec", True):
+        slug = None  # workspace-level phase: never inherits an active spec
+    else:
+        slug = a.spec or state.get("spec")
+        if not slug:
+            die("spec required: esdd phase <name> --spec <slug>")
+    missing = [r.format(s=slug) for r in PHASES[a.name]["requires"]]
+    missing = [m for m in missing if not (root / ESDD_DIR / m).exists()]
     if missing:
         warn(f"phase '{a.name}' is missing prerequisites: {', '.join(missing)}")
     if a.done:
@@ -724,9 +859,11 @@ def cmd_phase(a):
         if a.name not in done:
             done.append(a.name)
     state["current_phase"] = a.name
-    state["spec"] = slug
+    if slug:
+        state["spec"] = slug
     write_state(root, state)
-    out(f"phase '{a.name}' active for spec '{slug}'"
+    out(f"phase '{a.name}' active"
+        + (f" for spec '{slug}'" if slug else " (workspace level)")
         + (" (marked done)" if a.done else ""))
     skill_dir = SCRIPT_DIR.parent
     for ref in PHASES[a.name]["refs"]:
@@ -807,6 +944,20 @@ def main():
     pv = sub.add_parser("verify", help="handoff gate for a spec")
     pv.add_argument("--spec", required=True)
     pv.set_defaults(fn=cmd_verify)
+
+    pg = sub.add_parser("import", help="cache a graph/nav source into .esdd/graph/")
+    pg.add_argument("--source", help="e.g. codegraph, graphify, falkordb, neo4j, "
+                                    "understand, groma, custom")
+    pg.add_argument("--path", help="file or directory to copy into the cache")
+    pg.add_argument("--notes", help="free-text annotation stored in the manifest")
+    pg.add_argument("--max-file-mb", type=float, default=10,
+                    help="warn above this many MB per cached file (default 10)")
+    pg.add_argument("--snapshot", action="store_true",
+                    help="register a single-file --path as this source's "
+                         "normalized snapshot.json")
+    pg.add_argument("--list-sources", action="store_true",
+                    help="list cached graph sources and exit")
+    pg.set_defaults(fn=cmd_import)
 
     pp = sub.add_parser("phase", help="track workflow phases")
     pp.add_argument("name", nargs="?", choices=list(PHASES))

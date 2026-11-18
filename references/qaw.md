@@ -19,9 +19,16 @@ Elicit and record in `utility-tree.md`:
 
 ## Step 2 — ASR brainstorm (human loop)
 
-Round-robin questioning. For each business goal ask: **"What could make
-this fail at 10x? At 1/10 the budget? When the team doubles?"** Capture
-answers verbatim as ASR seeds, then structure each into the table:
+Seed before questioning: each **Impact Map row** from proposal.md
+(goal → actor → impact) is a candidate ASR, and the story **GWT
+scenarios** pin the QAS vocabulary for free — the `When` is a stimulus,
+the `Given` names the environment and artifact, the `Then` is the
+response seed. A map row that produced no scenario is a red flag: either
+the story is missing or the impact was decorative.
+
+Then round-robin questioning. For each business goal ask: **"What could
+make this fail at 10x? At 1/10 the budget? When the team doubles?"**
+Capture answers verbatim as ASR seeds, then structure each into the table:
 
 | Field | Question it answers |
 |-------|---------------------|

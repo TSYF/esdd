@@ -4,23 +4,23 @@
     {
       "id": 1,
       "prompt": "I want to add rate limiting to this API. It needs per-endpoint limits configured in YAML, a shared Redis store so all instances count together, and it must not add more than 5ms to p99 latency. ESDD this feature for me.",
-      "expected_output": "Full ESDD pipeline: .esdd scaffolded (or reused), spec 'rate-limit' with INVEST-checked proposal.md, utility-tree.md with ASRs and H/M/L-ranked QAS (latency QAS with numeric measure), design.md with C4 + sequence diagrams, spec-level MADR ADRs, Taskwarrior task graph under project <ws>.core.rate-limit with blocking edges, estimates under 100k, index task with synced adrs UDA. Human must be grilled during the run (scripted answers: yes to defaults, per-endpoint limits negotiable, team owns Redis ops).",
+      "expected_output": "Full ESDD pipeline: .esdd scaffolded (or reused), spec 'rate-limit' with proposal.md carrying per-story Given/When/Then acceptance scenarios (standard Gherkin order, observable Thens) and a traced Impact Map (goal/actor/impact/deliverable), utility-tree.md with ASRs seeded from the impact map and H/M/L-ranked QAS (latency QAS with numeric measure), design.md with C4 + sequence diagrams, spec-level MADR ADRs, Taskwarrior ticket graph under project <ws>.core.rate-limit with blocking edges, INVEST applied at TICKET time (not in the proposal), tickets' Verify/Done-when derived from originating GWT scenarios, estimates under 100k, index task with synced adrs UDA. Human must be grilled during the run (scripted answers: yes to defaults, per-endpoint limits negotiable, team owns Redis ops).",
       "files": [],
-      "notes": "Interactive: the runner must answer INVEST/QAW/ranking questions with the scripted answers above. Assertions to draft at run time: file existence, QAS measure numeric, project naming, verify passes."
+      "notes": "Interactive: the runner must answer Product-phase questions (goals/actors/impacts/stories + GWT walk-through) and ranking questions with the scripted answers above. Assertions to draft at run time: file existence, every story has a GWT block, Impact Map table present and traced, no INVEST table in proposal.md, QAS measure numeric, project naming, task briefs reference GWT scenarios, verify passes."
     },
     {
       "id": 2,
       "prompt": "We already have a proposal for the checkout spec in .esdd/specs/checkout/proposal.md. Run just the QAW and utility tree phases, then stop — I want to review the ranked QAS before any design work starts.",
-      "expected_output": "Standalone phase entry: only utility-tree.md populated (drivers, ASR table, ranked QAS with validated H/M/L). No design.md content beyond the template, no tasks created. Orchestrator asks ranking-validation questions and stops after Phase 3.",
+      "expected_output": "Standalone phase entry: only utility-tree.md populated (drivers, ASR table seeded from the proposal's Impact Map rows and GWT scenarios, ranked QAS with validated H/M/L). No design.md content beyond the template, no tasks created. Orchestrator asks ranking-validation questions and stops after Phase 3.",
       "files": [],
-      "notes": "Requires a pre-seeded .esdd workspace with a checkout spec. Assert utility-tree sections filled, design.md untouched, zero tasks in Taskwarrior project."
+      "notes": "Requires a pre-seeded .esdd workspace with a checkout spec whose proposal carries GWT scenarios + impact map. Assert utility-tree sections filled with ASR seeds traceable to impact rows, design.md untouched, zero tasks in Taskwarrior project."
     },
     {
       "id": 3,
       "prompt": "Break the payments-retry feature into agent-sized tasks using exhaustive spec-driven development. I will personally run the chaos engineering tests, so mark those as mine.",
-      "expected_output": "Full pipeline ending in handoff: task graph with depends edges, chaos-testing tasks carrying worker:human, esdd verify passes, and the handoff summary includes the human work order listing the chaos tasks. Agent tasks each have briefs, touches, and token_estimate under the soft limit.",
+      "expected_output": "Full pipeline ending in handoff: ticket graph with depends edges refined through the INVEST checklist at ticket time (Independent/Small/Testable, splits by GWT scenario), chaos-testing tickets carrying worker:human, each agent ticket's brief cites its originating GWT scenario with Verify/Done-when derived from the Then, esdd verify passes, and the handoff summary includes the human work order listing the chaos tickets.",
       "files": [],
-      "notes": "Scripted answer for the worker-selection question: human takes all chaos/ load-test tasks. Assert worker UDA distribution and verify exit code."
+      "notes": "Scripted answer for the worker-selection question: human takes all chaos/ load-test tickets. Assert worker UDA distribution, briefs with Story (GWT) field, verify exit code."
     }
   ]
 }
