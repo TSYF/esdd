@@ -20,7 +20,10 @@ through sub-agents so the orchestrator's context stays lean.
 ├── design.md         ADD architecture + ATAM findings   (Phases 4–5)
 ├── diagrams/*.puml   C4 + sequence/class/activity/state/ER
 ├── adrs/NNNN-*.md    spec-level MADR ADRs
-└── matrix.md         blocking-edge matrix (generated)
+├── sources/          imported external specs/plans
+├── matrix.md         blocking-edge matrix (generated)
+├── tasks.md          ledger, only when Taskwarrior is missing
+└── review-<gate>.md  review gate reports (design, tickets, code)
 ```
 
 Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
@@ -52,6 +55,33 @@ Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
    from the scenario it implements. A ticket that cannot name its
    originating scenario goes back to proposal.md — never invent one.
 
+## Specialist agents
+
+Four specialists do the phase work. Their definitions in `agents/*.md` are
+plain markdown with `name`/`description` frontmatter, so any harness can
+load them. For Claude Code, run
+`ln -s ~/.agents/skills/esdd/agents/*.md .claude/agents/`, or point other
+harnesses at `.agents/agents/*.md`.
+
+| Agent | Owns | Phases |
+|-------|------|--------|
+| `esdd-po` (`agents/esdd-po.md`) | grilling → proposal.md (GWT + Impact Map); business language only | 1 |
+| `esdd-architect` (`agents/esdd-architect.md`) | QAW → ASRs, utility tree; ADD (C4 L1–4, diagrams, ADRs), ATAM | 2–5 |
+| `esdd-fde` (`agents/esdd-fde.md`) | tickets from the converged design: INVEST, GWT-derived briefs, estimates, `depends`, `worker:human` | 6 |
+| `esdd-reviewer` (`agents/esdd-reviewer.md`) | gates: design, tickets, code — **optional/on-request** (experimental; method in `references/review.md`); never edits | gates |
+
+No subagent registration in your harness? Delegate anyway: spawn a
+general subagent whose brief is the agent file's body (frontmatter
+removed) plus the spec slug, the phase or gate, and the human's answers
+so far. Never run a specialist's phase inline — that is the failure mode
+this structure exists to prevent.
+
+Business gaps an Architect or FDE hits return to the PO as a blocking
+question tagged `for: po` — specialists never guess. A specialist reply
+always carries: the paths it wrote, a summary of five lines or fewer,
+its top findings, and any blocking questions. Artifact bodies are never
+pasted into replies.
+
 ## CLI quick reference (`esdd`, in `scripts/` of this skill)
 
 | Command | Purpose |
@@ -61,6 +91,7 @@ Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
 | `esdd env set GRAPH_NAV X` | configure code navigation aid |
 | `esdd tw -- <args>` | task(1) against nearest `.esdd/tasks` (with UDAs injected) |
 | `esdd spec new <slug> --project <p>` | scaffold spec + index task |
+| `esdd po import <file> --spec <slug>` | copy an external spec/plan into `sources/` and prep PO import mode |
 | `esdd spec list` | specs and artifact status |
 | `esdd adr new --level global\|directory\|spec --title "T"` | MADR ADR with correct numbering |
 | `esdd adr list` | all three levels with status |
@@ -68,7 +99,11 @@ Plus, per spec, in Taskwarrior: one **index task** (`+spec`, holds the
 | `esdd matrix --spec <slug> [--out f]` | blocking-edge matrix + cycle detection |
 | `esdd estimate --spec <slug> [--set]` | token estimates from `touches` |
 | `esdd verify --spec <slug>` | handoff gate |
-| `esdd phase <name> --spec <slug> [--done]` | track phase; names: product, qaw, tree, add, atam, handoff, retro |
+| `esdd review --gate design\|tickets\|code --spec <slug> [--task u] [--json]` | deterministic review checks; writes `review-<gate>.md` |
+| `esdd phase <name> --spec <slug> [--done] [--strict]` | track phase; names: product, qaw, tree, add, atam, handoff, retro. `--strict` exits 2 if prerequisites are missing |
+
+`spec list`, `matrix`, `estimate`, `verify` and `review` accept `--json`.
+`esdd estimate --touches "<globs>"` sizes globs without Taskwarrior.
 
 ## Workflow
 
@@ -90,7 +125,18 @@ Phases run standalone: entering at any phase is fine if its inputs exist
   must cite them.
 - Read the shared `.esdd/design.md` if it exists (C4 Level 1–2 boundary).
 
-### Phase 1 — Product (Given/When/Then + Impact Mapping)
+### Phase 1 — Product (Given/When/Then + Impact Mapping) · `esdd-po`
+
+Quality concerns the human raises here (e.g. "must not add 5ms to p99")
+are recorded verbatim under Constraints. The Architect turns them into
+ASRs in Phase 2.
+
+**Starting from an existing spec** (a refined Jira ticket, a Taskmaster
+tasks.json, a plan): copy it to `.esdd/specs/<slug>/sources/` (or run
+`esdd po import <file> --spec <slug>`) and dispatch `esdd-po` in import
+mode. The PO maps the source into proposal.md, asks the human to sign off
+on any acceptance criteria it converted into GWT, and grills only the
+gaps. The Architect (or the lite path) then runs on the resulting proposal.
 
 1. `esdd spec new <slug> --project <proj>` (derive slug and project from
    the human's ask; confirm both).
@@ -103,11 +149,15 @@ Phases run standalone: entering at any phase is fine if its inputs exist
    coupled; ticket-time refinement owns that (references/invest.md).
    This is the longest human loop in ESDD — do not rush it; every later
    phase inherits its precision.
-3. Draft proposal.md in a sub-agent (brief below), present to the human
-   for sign-off, then write the file.
+3. `esdd-po` drafts proposal.md. Present it to the human for sign-off,
+   then write the file.
 4. `esdd phase product --done --spec <slug>`.
 
-### Phase 2 — QAW
+### Phase 2 — QAW · `esdd-architect`
+
+The Architect owns this phase because finding ASRs takes technical
+judgment. If it finds a business gap, it routes the question back to the
+PO (`for: po`) and does not edit proposal.md itself.
 
 1. `esdd phase qaw --spec <slug>`; read `references/qaw.md`.
 2. Seed the brainstorm from the proposal: each **Impact Map row**
@@ -117,74 +167,115 @@ Phases run standalone: entering at any phase is fine if its inputs exist
    Then round-robin hardening ("what makes this fail at 10x?"), capture
    verbatim, then structure. Exit when the human twice answers "nothing
    missing" to the read-back.
-3. A sub-agent can structure raw notes into the ASR table; the
-   brainstorm itself stays with the orchestrator.
+3. `esdd-architect` structures the raw notes into the ASR table. The
+   brainstorm questions themselves reach the human through the
+   orchestrator.
 4. Write the drivers + ASR sections of `utility-tree.md`.
 
-### Phase 3 — Utility tree
+### Phase 3 — Utility tree · `esdd-architect`
 
 1. Read `references/utility-tree.md`. For each ASR, draft QAS with all
-   six parts and measurable response measures — a sub-agent drafts, the
-   orchestrator validates with the human.
+   six parts and measurable response measures — `esdd-architect` drafts
+   them and the orchestrator validates them with the human.
 2. Propose BV/TR rankings **with one-line rationales**; the human
    confirms or overrides each. Never rank silently.
 3. Write the tree; `esdd phase tree --done --spec <slug>`.
 4. >12 QAS means the ASR list wasn't distilled — merge and demote.
 
-### Phase 4 — ADD (the design loop)
+### Phase 4 — ADD (the design loop) · `esdd-architect`
 
 Read `references/add.md`, `references/c4-plantuml.md`, and
 `references/taskwarrior.md`. Then iterate the five steps; the loop unit is
-one ranked QAS:
+one ranked QAS. No tickets are created here; the FDE decomposes the design
+once it has converged (Phase 6), so ATAM rework never churns tickets.
 
 1. Review inputs, state design purpose (two sentences, citing drivers).
 2. Propose the iteration goal from the top unaddressed QAS; human confirms.
 3. Choose elements to refine.
 4. Choose design concepts; each cites a QAS or an ADR. Contradicting an
    accepted ADR ⇒ new superseding ADR, old marked `deprecated`.
-5. Instantiate: update design.md (Overview + Interfaces), delegate
-   diagrams to a sub-agent, `esdd adr new --level spec` per significant
-   choice, refine the iteration's work into **INVEST-clean tickets** per
-   `references/invest.md` and decompose into tasks (batch `task import`,
-   briefs as first annotations with `Verify`/`Done when` derived from the
-   story's GWT, `depends` for blocking edges), refresh
-   `esdd matrix --spec <slug> --out matrix.md`, then ask the human which
-   tasks they want to own (`worker:human`). Run
-   `esdd estimate --spec <slug> --set`.
+5. Instantiate: update design.md (Overview + Interfaces), author the
+   diagrams (`*.puml`, element names matching design.md exactly), and run
+   `esdd adr new --level spec` for each significant choice. Keep the
+   index task's `adrs` UDA in sync.
 6. Loop until the human declares the architecture complete. Keep each
    iteration's design purpose in the Iteration Goals Log — ATAM uses it.
 
-### Phase 5 — ATAM
+### Phase 5 — ATAM · `esdd-architect`
 
 Read `references/atam.md`.
 
-1. Sub-agent walks each QAS through the design (highest BV×TR first),
-   marking achieved / addressed / at-risk.
+1. `esdd-architect` walks each QAS through the design (highest BV×TR
+   first), marking achieved / addressed / at-risk.
 2. Classify findings with the templates: risks, non-risks, sensitivities,
    tradeoffs — each risk cites its causing ADR or is sent back as an
    unmade decision.
 3. Human reviews severity: **blocks goal** → new ADD iteration ("mitigate
    <risk>"); **needs mitigation** → hand off only with explicit human
-   acceptance (recorded as a task); **watch** → listed, move on.
+   acceptance (the FDE records it as a ticket in Phase 6); **watch** →
+   listed, move on.
 4. Cluster into risk themes; record all of it in design.md's ATAM
    section. `esdd phase atam --done --spec <slug>`.
 
-### Phase 6 — Handoff
+### Phase 6 — Handoff · `esdd-fde`
 
-Read `references/token-budget.md` and `references/invest.md`.
+Read `references/invest.md`, `references/taskwarrior.md`,
+`references/token-budget.md` and `references/execution.md`.
 
-1. **INVEST re-check** (the FDE pass): every ticket Independent, Small,
-   Testable — splits go by GWT scenario (invest.md); token SPLIT/HARD-STOP
-   splits follow token-budget.md along design.md interfaces. Hard stops
-   need the human's written sign-off in the task's annotations.
-2. `esdd estimate --spec <slug> --set`; split every SPLIT verdict.
-3. `esdd matrix --spec <slug>` — no cycles.
-4. `esdd verify --spec <slug>` must pass: one index task, `adrs` UDA in
-   sync with files on disk, every actionable task has an estimate and a
-   worker, dependencies resolve.
-5. Present the summary: spec list, task counts by status, the blocking-
+1. **Worksize**: decompose the converged design into **INVEST-clean
+   tickets** (references/invest.md; spike-first and morphology splits
+   from execution.md). Import them as one batch (`esdd tw -- import`).
+   Each brief is the first annotation, with `Verify`/`Done when` derived
+   from the story's GWT. Blocking edges go in `depends`. Needs-mitigation
+   ATAM risks become explicit acceptance tickets. Then ask the human
+   which tickets they want to own (`worker:human`).
+2. **INVEST gate**: every ticket must be Independent, Small, Testable.
+   Splits go by GWT scenarios (invest.md). Token SPLIT/HARD-STOP splits
+   follow token-budget.md along design.md interfaces. Hard stops need the
+   human's written sign-off (`HARDCAP-APPROVED`) in the task's
+   annotations.
+3. `esdd estimate --spec <slug> --set`; split every SPLIT verdict.
+4. `esdd matrix --spec <slug> --out matrix.md` must pass: no cycles.
+5. `esdd verify --spec <slug>` must pass: one index task, `adrs` UDA in
+   sync, dependencies resolve, every actionable task has an estimate and
+   a worker.
+6. **Optional independent review:** run
+   `esdd review --gate tickets --spec <slug>` (deterministic checks), then
+   dispatch `esdd-reviewer` on request. On reject, the violations return
+   to the FDE under the design gate's loop rule. This is not a
+   standing gate; the CLI checks are the default.
+7. Present the summary: spec list, task counts by status, the blocking-
    edge critical path, and the **human work order** (their `worker:human`
-   tasks). Workable blockers-first: `esdd tw -- next` is the agent queue.
+   tickets). Workable blockers-first: `esdd tw -- next` is the agent queue.
+
+**Reviewer gate `code` (post-execution, on request):** after a task is
+done, `esdd review --gate code --spec <slug> --task <uuid>` runs the
+mechanical checks; dispatch `esdd-reviewer` when the change touches
+design.md interfaces, or when the human asks. Inputs are the task's
+brief and the diff over its `touches`; it passes only when the GWT Then
+is observably met and the interface contracts in design.md are honoured.
+
+### Lite path — tickets from a decided plan (PO → FDE → `esdd review`)
+
+Use it when the design was already decided or reviewed elsewhere, or for a
+change too small for QAW/ADD/ATAM. Example: a plan from a coding agent's
+plan mode.
+
+1. PO import mode on the plan (Phase 1 above). The proposal gets stories
+   with human-confirmed GWT scenarios.
+2. Skip Phases 2–5. There is no utility tree, no ADRs and no ATAM.
+3. Dispatch `esdd-fde` with the **lite profile** (Phase 6). Tickets
+   derive from the proposal's GWT. Interfaces stay empty unless
+   design.md already lists some, and splits go by GWT scenario or
+   morphology.
+4. Run `esdd review --gate tickets` (lite profile) and `esdd verify`;
+   dispatch the reviewer only on request.
+
+Unchanged in the lite path: token budget, orchestrator-owned human
+contact, slugs, interfaces-before-tasks (a ticket lists only interfaces
+that exist), GWT as the contract. What you give up: quality-attribute
+analysis, ATAM risk discovery, ADRs. An architectural decision hiding
+in the plan means take the full path instead.
 
 ### Retro — documenting an existing repo (standalone, workspace level)
 
@@ -212,8 +303,13 @@ Context" future QAWs read. Token thrift is the phase's governing rule:
 
 ## Sub-agent briefs
 
-Two standard briefs cover most delegation. Keep them lean; the whole
-point is context isolation.
+Send each phase to the specialist that owns it (Specialist agents
+above). A specialist brief carries three things — spec slug, the phase
+or gate, and the human's answers to its earlier questions; the
+specialist finds and reads everything else itself. Replies come back as
+written paths, a short summary, top findings, and blocking questions —
+never artifact bodies. The generic briefs below still cover work outside
+the four roles; keep them lean, since context isolation is the point.
 
 **Task dispatch (post-handoff execution)** — read `references/execution.md`
 first: spike-first ticketing, morphology splits, standing workbench
@@ -256,8 +352,10 @@ bullet list. No full prose.
 ## Degradation
 
 - No Taskwarrior binary: `esdd tw` fails loudly. Proceed markdown-only —
-  track tasks in `specs/<slug>/tasks.md` as a fallback table, and note in
-  handoff that the graph was never materialized.
+  track tickets in `specs/<slug>/tasks.md` as a fallback table (the typed
+  runtime writes it automatically when present), size each row with
+  `esdd estimate --touches "<globs>"`, and note in handoff that the graph
+  was never materialized.
 - Graph nav absent/unusable: grep/read. Never block a phase on it.
 - PlantUML can't render: the source files are still the spec; note the
   unrendered state in design.md.

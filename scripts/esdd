@@ -15,6 +15,7 @@ Subcommands:
   matrix [--spec S]    blocking-edge matrix from `task export`
   estimate [--spec S]  token estimates from each task's touches UDA
   verify --spec S      handoff gate: index task, ADRs, budgets, cycles
+  review --gate GATE   deterministic review gates (design/tickets/code)
   phase [NAME]         phase state tracker with prerequisite checks
 """
 
@@ -48,7 +49,7 @@ UDA_OVERRIDES = [
 ]
 
 PHASES = {
-    "product": {"refs": ["references/invest.md"], "requires": []},
+    "product": {"refs": ["references/product.md"], "requires": []},
     "qaw": {"refs": ["references/qaw.md"], "requires": ["specs/{s}/proposal.md"]},
     "tree": {"refs": ["references/utility-tree.md"], "requires": ["specs/{s}/proposal.md"]},
     "add": {
@@ -136,7 +137,25 @@ def task_binary():
     return shutil.which("task")
 
 
-def run_task(root, args, batch=False):
+def task_env(root):
+    """Environment for task(1). Taskwarrior refuses to run without an rc
+    file; when the user has none, use a workspace one (ESDD settings are
+    all passed as rc.* overrides, so it can stay empty)."""
+    env = os.environ.copy()
+    taskrc = os.environ.get("TASKRC") or Path.home() / ".config" / "task" / "taskrc"
+    home = Path.home()
+    if (taskrc.exists() or (home / ".taskrc").exists()
+            or (home / ".task" / "taskrc").exists()):
+        return env
+    rc = root / ESDD_DIR / "tasks" / "taskrc"
+    if not rc.exists():
+        rc.write_text("# created by esdd: Taskwarrior needs an rc file; "
+                      "ESDD settings are all passed as rc.* overrides\n")
+    env["TASKRC"] = str(rc)
+    return env
+
+
+def run_task(root, args, batch=False, quiet=False):
     """Run task(1) with .esdd data location and ESDD UDAs injected."""
     task = task_binary()
     if not task:
@@ -147,7 +166,9 @@ def run_task(root, args, batch=False):
     if batch:
         cmd += ["rc.confirmation=no", "rc.recurrence.confirmation=no"]
     cmd += list(args)
-    return subprocess.call(cmd)
+    # quiet keeps task(1)'s chatter off stdout when stdout carries --json
+    return subprocess.call(cmd, env=task_env(root),
+                           stdout=subprocess.DEVNULL if quiet else None)
 
 
 def task_json(root, filters=()):
@@ -162,7 +183,8 @@ def task_json(root, filters=()):
            "(", "status:pending", "or", "status:waiting", "or",
            "status:in-progress", "or", "status:completed", ")",
            *filters, "export"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True,
+                         env=task_env(root))
     if res.returncode != 0:
         die(f"task export failed: {res.stderr.strip()}")
     try:
@@ -337,6 +359,13 @@ def cmd_doctor(a):
 def cmd_env(a):
     root = find_root(a.root)
     env = read_env(root)
+    if a.key == "set":
+        # documented form: esdd env set KEY VALUE
+        if a.value is None or a.extra is None:
+            die("usage: esdd env set KEY VALUE")
+        a.key, a.value = a.value, a.extra
+    elif a.extra is not None:
+        die(f"unrecognized arguments: {a.extra}")
     if a.unset:
         env.pop(a.unset, None)
         write_env(root, env)
@@ -372,24 +401,34 @@ def cmd_tw(a):
 
 # --------------------------------------------------------------------- spec ---
 
+def scaffold_spec(root, slug, project, title):
+    """Create .esdd/specs/<slug>/ (dirs + rendered templates). Idempotent:
+    existing files are left untouched. Returns the template mapping."""
+    check_slug(slug)
+    sdir = root / ESDD_DIR / "specs" / slug
+    (sdir / "diagrams").mkdir(parents=True, exist_ok=True)
+    (sdir / "adrs").mkdir(exist_ok=True)
+    (sdir / "sources").mkdir(exist_ok=True)
+    mapping = {"SLUG": slug, "TITLE": title or slug.replace("-", " ").title(),
+               "DATE": date.today(), "PROJECT": project,
+               "WORKSPACE": workspace_name(root),
+               "FULL_PROJECT": f"{workspace_name(root)}.{project}.{slug}"}
+    for tpl, name in [("proposal-template.md", "proposal.md"),
+                      ("design-template.md", "design.md"),
+                      ("utility-tree-template.md", "utility-tree.md")]:
+        dest = sdir / name
+        if not dest.exists() and assets_path(tpl):
+            render_template(tpl, mapping, dest)
+    return mapping, sdir
+
+
 def cmd_spec_new(a):
     root = find_root(a.root)
     check_slug(a.slug)
     sdir = root / ESDD_DIR / "specs" / a.slug
     if sdir.exists() and any(sdir.iterdir()) and not a.force:
         die(f"spec '{a.slug}' already exists at {sdir} (use --force to rescaffold)")
-    (sdir / "diagrams").mkdir(parents=True, exist_ok=True)
-    (sdir / "adrs").mkdir(exist_ok=True)
-
-    mapping = {"SLUG": a.slug, "TITLE": a.title or a.slug.replace("-", " ").title(),
-               "DATE": date.today(), "PROJECT": a.project,
-               "WORKSPACE": workspace_name(root),
-               "FULL_PROJECT": f"{workspace_name(root)}.{a.project}.{a.slug}"}
-    for tpl, name in [("proposal-template.md", "proposal.md"),
-                      ("design-template.md", "design.md"),
-                      ("utility-tree-template.md", "utility-tree.md")]:
-        if assets_path(tpl):
-            render_template(tpl, mapping, sdir / name)
+    mapping, sdir = scaffold_spec(root, a.slug, a.project, a.title)
 
     out(f"spec '{a.slug}' scaffolded at {sdir}/")
     out(f"Taskwarrior project: {mapping['FULL_PROJECT']}")
@@ -416,6 +455,31 @@ def cmd_spec_new(a):
     out("Next: esdd phase product --spec " + a.slug)
 
 
+def cmd_po_import(a):
+    """Copy an external spec/plan into .esdd/specs/<slug>/sources/ and prep
+    PO import mode (the Lite/existing-spec entry path)."""
+    root = find_root(a.root)
+    if not a.spec:
+        die("--spec is required (esdd po import <file> --spec <slug>)")
+    check_slug(a.spec)
+    src = Path(a.file).expanduser().resolve()
+    if not src.is_file():
+        die(f"source file not found: {src}")
+    existed = (root / ESDD_DIR / "specs" / a.spec / "proposal.md").is_file()
+    mapping, sdir = scaffold_spec(root, a.spec, a.project, a.title)
+    sources = sdir / "sources"
+    dest = sources / src.name
+    shutil.copy2(src, dest)
+    out(f"copied '{src.name}' into {sources}")
+    out(f"spec '{a.spec}': proposal.md "
+        f"{'exists - PO extends it' if existed else 'scaffolded'}")
+    out("next: dispatch esdd-po in import mode for spec '" + a.spec + "'")
+    out("it maps the source into proposal.md, converts acceptance criteria")
+    out("into GWT (each conversion marked `converted` and confirmed by the")
+    out("human), and grills only the gaps. Then run the Architect — or the")
+    out("lite path (skip Phases 2-5) if the plan is already decided.")
+
+
 def cmd_spec_list(a):
     root = find_root(a.root)
     specs_dir = root / ESDD_DIR / "specs"
@@ -431,6 +495,12 @@ def cmd_spec_list(a):
             p = d / f
             marks.append(label if p.exists() and len(p.read_text()) > 200 else "-")
         rows.append((d.name, "".join(marks), len(list((d / "adrs").glob("*.md")))))
+    if a.json:
+        out(json.dumps([{"spec": n, "proposal": m[0] == "P",
+                         "utility_tree": m[1] == "U",
+                         "design": m[2] == "D", "spec_adrs": k}
+                        for n, m, k in rows]))
+        return
     if not rows:
         out("no specs yet - create one with: esdd spec new <slug> --project <proj>")
         return
@@ -510,16 +580,22 @@ def cmd_adr_list(a):
         out("no ADRs found at any level")
 
 
-def adr_file_lines(adir):
+def adr_records(adir):
+    """Parse MADR files into {file, stem, title, status} (status '?' if absent)."""
     rows = []
     for f in sorted(adir.glob("*.md")):
         text = f.read_text(errors="replace")
         tm = re.search(r"^#\s+\d+\.\s+(.+)$", text, re.M)
         sm = re.search(r"^##\s*Status\s*\n\s*(\S+)", text, re.M)
-        title = tm.group(1).strip() if tm else f.stem
-        status = sm.group(1).strip() if sm else "?"
-        rows.append(f"{f.stem}  [{status}]  {title}")
-    return rows or ["(none)"]
+        rows.append({"file": f, "stem": f.stem,
+                     "title": tm.group(1).strip() if tm else f.stem,
+                     "status": sm.group(1).strip() if sm else "?"})
+    return rows
+
+
+def adr_file_lines(adir):
+    return [f"{r['stem']}  [{r['status']}]  {r['title']}"
+            for r in adr_records(adir)] or ["(none)"]
 
 
 # ------------------------------------------------------------------- matrix ---
@@ -557,7 +633,8 @@ def cmd_matrix(a):
     if a.spec:
         tasks = spec_tasks(tasks, a.spec)
     if not tasks:
-        out("no tasks found.")
+        out(json.dumps({"tasks": [], "cycles": []}) if a.json
+            else "no tasks found.")
         return
     by_uuid, deps = build_graph(tasks)
     blocks = {u: [] for u in by_uuid}
@@ -585,6 +662,17 @@ def cmd_matrix(a):
         lines.append(f"WARNING dependency cycle: "
                      f"{' -> '.join(tids.get(u, u[:8]) for u in cyc)}")
     text = "\n".join(lines) + "\n"
+    if a.json:
+        if a.out:
+            Path(a.out).write_text(text)
+        out(json.dumps({"tasks": [{"id": t.get("id"), "uuid": t.get("uuid"),
+                                   "description": t.get("description"),
+                                   "project": t.get("project"),
+                                   "depends": deps.get(t.get("uuid"), []),
+                                   "blocks": blocks.get(t.get("uuid"), [])}
+                                  for t in tasks],
+                         "cycles": cycles}))
+        return
     if a.out:
         Path(a.out).write_text(text)
         out(f"matrix written to {a.out} ({len(tasks)} tasks, {len(cycles)} cycles)")
@@ -596,13 +684,25 @@ def cmd_matrix(a):
 
 def cmd_estimate(a):
     root = find_root(a.root)
+    if a.touches is not None:
+        # Taskwarrior-free estimate, used by the tasks.md fallback
+        tokens, files, missing = estimate_tokens(root, a.touches.split(","))
+        v = verdict_for(tokens)
+        if a.json:
+            out(json.dumps({"tokens": tokens, "files": len(files),
+                            "missing": missing, "verdict": v}))
+        else:
+            out(f"{tokens} tokens over {len(files)} files: {v}"
+                + (f" (missing globs: {', '.join(missing)})" if missing else ""))
+        return
     tasks = task_json(root)
     if a.spec:
         tasks = spec_tasks(tasks, a.spec)
     if not a.all:
         tasks = [t for t in tasks if t.get("touches")]
     if not tasks:
-        out("no tasks with a touches UDA found.")
+        out(json.dumps({"tasks": []}) if a.json
+            else "no tasks with a touches UDA found.")
         return
     rows = []
     for t in sorted(tasks, key=lambda x: x.get("id") or 0):
@@ -612,7 +712,13 @@ def cmd_estimate(a):
         rows.append((t, tokens, len(files), missing, v))
         if a.set and t.get("uuid"):
             run_task(root, [t["uuid"], "modify", f"token_estimate:{tokens}"],
-                     batch=True)
+                     batch=True, quiet=a.json)
+    if a.json:
+        out(json.dumps([{"id": t.get("id"), "uuid": t.get("uuid"),
+                         "description": t.get("description"), "files": nf,
+                         "tokens": tokens, "verdict": v, "missing": missing}
+                        for t, tokens, nf, missing, v in rows]))
+        return
     out("| Task | Files | Est. tokens | Verdict | Missing globs |")
     out("|------|-------|-------------|---------|---------------|")
     for t, tokens, nf, missing, v in rows:
@@ -628,13 +734,14 @@ def cmd_estimate(a):
 
 # ------------------------------------------------------------------ verify ---
 
-def cmd_verify(a):
-    root = find_root(a.root)
-    check_slug(a.spec)
-    sdir = root / ESDD_DIR / "specs" / a.spec
+def compute_verify(root, slug):
+    """Deterministic handoff gate. Returns a result dict; never prints/exits."""
+    sdir = root / ESDD_DIR / "specs" / slug
     if not sdir.is_dir():
-        die(f"no spec directory at {sdir}")
-    tasks = spec_tasks(task_json(root), a.spec)
+        return {"spec": slug, "sdir": sdir, "pass": False,
+                "failures": [f"no spec directory at {sdir}"],
+                "notes": [], "human_work_order": [], "tasks": []}
+    tasks = spec_tasks(task_json(root), slug)
     failures, notes = [], []
 
     index = [t for t in tasks if "spec" in (t.get("tags") or [])]
@@ -678,13 +785,36 @@ def cmd_verify(a):
             failures.append(f"task {tid} '{(t.get('description') or '')[:40]}' "
                             f"has neither token_estimate nor touches")
         elif est > HARD_LIMIT and not any(
-                "HARDCAP-APPROVED" in (a.get("description") or "")
-                for a in (t.get("annotations") or [])):
+                "HARDCAP-APPROVED" in (x.get("description") or "")
+                for x in (t.get("annotations") or [])):
             failures.append(f"task {tid} estimate {est:,} exceeds hard limit "
                             f"{HARD_LIMIT:,} without HARDCAP-APPROVED sign-off")
         if not t.get("worker"):
             notes.append(f"task {tid} has no worker UDA (defaults to agent)")
 
+    human = [t for t in tasks
+             if t.get("worker") == "human" and t.get("status") in ("pending", "waiting")]
+    return {"spec": slug, "sdir": sdir, "pass": not failures,
+            "failures": failures, "notes": notes,
+            "human_work_order": [{"id": t.get("id"), "uuid": t.get("uuid"),
+                                  "description": t.get("description")}
+                                 for t in human],
+            "human_tasks": human, "tasks": tasks}
+
+
+def cmd_verify(a):
+    root = find_root(a.root)
+    check_slug(a.spec)
+    res = compute_verify(root, a.spec)
+    if not res["sdir"].is_dir():
+        die(f"no spec directory at {res['sdir']}")
+    failures, notes = res["failures"], res["notes"]
+    human = res["human_tasks"]
+    if a.json:
+        out(json.dumps({"spec": a.spec, "pass": not failures,
+                        "failures": failures, "notes": notes,
+                        "human_work_order": res["human_work_order"]}))
+        sys.exit(1 if failures else 0)
     out(f"verify spec '{a.spec}':")
     for n in notes:
         out(f"  note:  {n}")
@@ -693,8 +823,6 @@ def cmd_verify(a):
     for f in failures:
         out(f"  FAIL:  {f}")
 
-    human = [t for t in tasks
-             if t.get("worker") == "human" and t.get("status") in ("pending", "waiting")]
     if human:
         out("")
         out("human work order:")
@@ -706,6 +834,627 @@ def cmd_verify(a):
             if brief:
                 out(f"        {brief}")
     sys.exit(1 if failures else 0)
+
+
+# ------------------------------------------------------------------ review ---
+
+REVIEW_GATES = ["design", "tickets", "code"]
+QAS_PARTS = ["Source", "Stimulus", "Artifact", "Environment", "Response",
+             "Response Measure"]
+
+
+def read_text(path):
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def md_section(text, heading):
+    """Body of a level-2 markdown section (None when absent)."""
+    m = re.search(rf"^{re.escape(heading)}\s*$", text or "", re.M)
+    if not m:
+        return None
+    start = m.end()
+    nxt = re.search(r"^##\s+", text[start:], re.M)
+    return text[start:start + nxt.start()] if nxt else text[start:]
+
+
+def story_gwt_map(text):
+    """US-id -> whether its section contains a ```gherkin block."""
+    stories, cur = {}, None
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("|"):
+            continue
+        m = re.match(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(US-\d+)(?:\*\*)?\s*:?", line)
+        if m:
+            cur = m.group(1)
+            stories.setdefault(cur, False)
+            continue
+        if line.startswith("## "):
+            cur = None
+            continue
+        if cur and re.match(r"^\s*```gherkin\b", line, re.I):
+            stories[cur] = True
+    return stories
+
+
+def impact_map_rows(text):
+    sec = md_section(text, "## Impact Map")
+    if sec is None:
+        return None
+    rows = []
+    for line in sec.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if cells and cells[0].lower().startswith("goal"):
+            continue
+        if cells and all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            continue
+        if any(cells):
+            rows.append(cells)
+    return rows
+
+
+def qas_sections(text):
+    return re.split(r"^###\s+QAS-", text or "", flags=re.M)[1:]
+
+
+def qas_missing_parts(sec):
+    missing = []
+    for part in QAS_PARTS:
+        m = re.search(rf"^\s*(?:-\s*)?\*\*{re.escape(part)}\*\*:\s*(.*)$",
+                      sec, re.M | re.I)
+        if not m or not m.group(1).strip():
+            missing.append(part)
+    return missing
+
+
+def design_interfaces(text):
+    """Interface names under '## Interfaces'; None when the section is absent."""
+    sec = md_section(text, "## Interfaces")
+    if sec is None:
+        return None
+    names = []
+    for line in sec.splitlines():
+        m = re.match(r"^###\s+`([^`]+)`\s*$", line)
+        if not m:
+            m = re.match(r"^###\s+(.+?)\s*$", line)
+        if m:
+            names.append(m.group(1).strip())
+    return names
+
+
+def diagram_refs(text):
+    return sorted(set(re.findall(r"diagrams/[A-Za-z0-9._<>/-]+\.puml",
+                                 text or "")))
+
+
+def first_annotation(task):
+    anns = task.get("annotations") or []
+    return (anns[0].get("description") or "") if anns else ""
+
+
+def brief_field(brief, field):
+    """Field value in a multi-line brief or a ` | `-separated one-liner."""
+    m = re.search(rf"{re.escape(field)}:\s*(.+?)(?=\s+\|\s+|\n|$)",
+                  brief or "", re.M | re.I | re.S)
+    return m.group(1).strip() if m else None
+
+
+def brief_interfaces(brief):
+    val = brief_field(brief, "Interface obligations")
+    if not val or val.lower() in ("none", "-", "n/a", "[]"):
+        return []
+    names = re.findall(r"`([^`]+)`", val)
+    if not names:
+        names = [x.strip() for x in re.split(r"[,;]", val) if x.strip()]
+    return names
+
+
+def check_row(checks, rule, fails=(), pass_detail="ok", judgment=None,
+              skip=None):
+    if skip is not None:
+        checks.append({"rule": rule, "status": "skip", "detail": skip})
+    elif judgment is not None:
+        checks.append({"rule": rule, "status": "judgment", "detail": judgment})
+    elif fails:
+        checks.append({"rule": rule, "status": "fail",
+                       "detail": "; ".join(fails)})
+    else:
+        checks.append({"rule": rule, "status": "pass", "detail": pass_detail})
+
+
+def task_label(t):
+    return f"task {t.get('id')} '{(t.get('description') or '')[:36]}'"
+
+
+def task_path(t):
+    return f"task:{(t.get('uuid') or '?')[:8]}"
+
+
+def add_violation(violations, rule, path, detail):
+    violations.append({"rule": rule, "path": path or "", "detail": detail})
+
+
+def actionable_tasks(tasks):
+    return [t for t in tasks
+            if "spec" not in (t.get("tags") or [])
+            and t.get("status") in ("pending", "waiting", "in-progress",
+                                    "recurring")]
+
+
+def task_tokens(root, t):
+    est = t.get("token_estimate")
+    if est:
+        return int(est)
+    if t.get("touches"):
+        tokens, _, _ = estimate_tokens(root, (t.get("touches") or "").split(","))
+        return tokens
+    return None
+
+
+def review_tickets(root, slug, sdir):
+    """Deterministic subset of the tickets gate + judgment rows."""
+    checks, violations = [], []
+    res = compute_verify(root, slug)
+    for f in res["failures"]:
+        m = re.search(r"task (\d+)", f)
+        add_violation(violations, "verify",
+                      f"task:{m.group(1)}" if m else "", f)
+    check_row(checks, "verify", res["failures"], "verify gate clear")
+
+    tasks = actionable_tasks(res["tasks"])
+    proposal = read_text(sdir / "proposal.md") or ""
+    stories = story_gwt_map(proposal)
+    design = read_text(sdir / "design.md")
+    interfaces = design_interfaces(design) if design is not None else None
+
+    missing_brief, no_story, bad_story = [], [], []
+    no_verify, no_done, bad_iface, bad_tokens, no_worker = [], [], [], [], []
+    for t in tasks:
+        brief = first_annotation(t)
+        if not brief:
+            missing_brief.append((t, "first annotation is not a brief"))
+            continue
+        sid_m = re.search(r"\b(US-\d+)\b", brief)
+        if not sid_m:
+            no_story.append((t, "brief names no US-n"))
+        else:
+            sid = sid_m.group(1)
+            if sid not in stories:
+                bad_story.append((t, f"{sid} is not in proposal.md"))
+            elif not stories[sid]:
+                bad_story.append((t, f"{sid} has no GWT block"))
+        if "Verify:" not in brief:
+            no_verify.append((t, "brief has no Verify:"))
+        if "Done when:" not in brief:
+            no_done.append((t, "brief has no Done when:"))
+        wanted = brief_interfaces(brief)
+        if wanted:
+            known = set(interfaces or [])
+            unknown = [n for n in wanted if n not in known]
+            if unknown:
+                bad_iface.append(
+                    (t, "interfaces not in design.md: " + ", ".join(unknown)))
+        est = task_tokens(root, t)
+        if est is None:
+            bad_tokens.append((t, "no token estimate"))
+        elif est > HARD_LIMIT:
+            approved = any("HARDCAP-APPROVED" in (ann.get("description") or "")
+                           for ann in (t.get("annotations") or []))
+            if not approved:
+                bad_tokens.append(
+                    (t, f"{est:,} over hard limit without HARDCAP-APPROVED"))
+        elif est > SOFT_LIMIT:
+            bad_tokens.append((t, f"{est:,} in SPLIT band; split required"))
+        if not t.get("worker"):
+            no_worker.append((t, "worker UDA not set"))
+
+    for rule, items in [
+        ("brief-present", missing_brief),
+        ("brief-story", no_story),
+        ("story-gwt", bad_story),
+        ("brief-verify", no_verify),
+        ("brief-done-when", no_done),
+        ("brief-interfaces", bad_iface),
+        ("token-budget", bad_tokens),
+        ("worker-set", no_worker),
+    ]:
+        check_row(checks, rule, [f"{task_label(t)}: {d}" for t, d in items])
+        for t, d in items:
+            add_violation(violations, rule, task_path(t), d)
+
+    check_row(checks, "gwt-derivation",
+              judgment="Verify/Done when must derive from the story's Then "
+                       "(agent/human judgement)")
+    check_row(checks, "invest",
+              judgment="Independent/Small/Testable per references/invest.md "
+                       "(agent/human judgement)")
+    return checks, violations
+
+
+def review_design(root, slug, sdir):
+    """Mechanical design checks; judgement-shaped items never fail."""
+    checks, violations = [], []
+    proposal = read_text(sdir / "proposal.md")
+    if proposal is None:
+        add_violation(violations, "proposal-present", "proposal.md",
+                      "proposal.md is missing")
+        check_row(checks, "proposal-present", ["proposal.md is missing"])
+    else:
+        check_row(checks, "proposal-present", pass_detail="proposal.md present")
+        rows = impact_map_rows(proposal)
+        if rows is None:
+            add_violation(violations, "impact-map", "proposal.md",
+                          "## Impact Map section is missing")
+            check_row(checks, "impact-map", ["## Impact Map section is missing"])
+        elif not rows:
+            check_row(checks, "impact-map",
+                      judgment="Impact Map present but no filled rows")
+        else:
+            check_row(checks, "impact-map",
+                      pass_detail=f"{len(rows)} row(s)")
+
+    tree = read_text(sdir / "utility-tree.md")
+    if tree is None:
+        add_violation(violations, "utility-tree", "utility-tree.md",
+                      "utility-tree.md is missing (lite profile: skip this gate)")
+        check_row(checks, "utility-tree", ["utility-tree.md is missing"])
+    else:
+        secs = qas_sections(tree)
+        if not secs:
+            check_row(checks, "qas-six-part", judgment="no QAS sections yet")
+        else:
+            fails = []
+            for i, sec in enumerate(secs, 1):
+                miss = qas_missing_parts(sec)
+                if miss:
+                    fails.append(f"QAS-{i} missing: {', '.join(miss)}")
+            check_row(checks, "qas-six-part", fails)
+            for f in fails:
+                add_violation(violations, "qas-six-part", "utility-tree.md", f)
+
+    adir = sdir / "adrs"
+    records = adr_records(adir) if adir.is_dir() else []
+    if not records:
+        check_row(checks, "adr-status", skip="no spec ADRs")
+    else:
+        fails = [f"{r['stem']}: missing ## Status" for r in records
+                 if r["status"] == "?"]
+        check_row(checks, "adr-status", fails)
+        for f in fails:
+            add_violation(violations, "adr-status", "adrs/", f)
+
+    design = read_text(sdir / "design.md")
+    if design is None:
+        add_violation(violations, "interfaces", "design.md",
+                      "design.md is missing")
+        check_row(checks, "interfaces", ["design.md is missing"])
+    else:
+        names = design_interfaces(design)
+        if names is None:
+            add_violation(violations, "interfaces", "design.md",
+                          "## Interfaces section is missing")
+            check_row(checks, "interfaces",
+                      ["## Interfaces section is missing"])
+        elif not names:
+            check_row(checks, "interfaces",
+                      judgment="Interfaces section has no entries")
+        elif any((not n) or "<" in n or ">" in n for n in names):
+            check_row(checks, "interfaces",
+                      judgment="Interfaces still template placeholders")
+        else:
+            check_row(checks, "interfaces",
+                      pass_detail=f"{len(names)} interface(s)")
+
+        refs = [r for r in diagram_refs(design) if "<" not in r and ">" not in r]
+        if not refs:
+            check_row(checks, "diagram-refs", skip="no concrete diagram references")
+        else:
+            missing = [r for r in refs if not (sdir / r).is_file()]
+            check_row(checks, "diagram-refs", missing)
+            for r in missing:
+                add_violation(violations, "diagram-refs", r,
+                              "referenced diagram does not exist")
+
+    check_row(checks, "qas-measure",
+              judgment="Response Measure must be numeric (agent/human)")
+    check_row(checks, "design-trace",
+              judgment="Every Impact Map row / ASR must trace to a QAS and "
+                       "design.md concept (agent/human)")
+    check_row(checks, "adr-supersede",
+              judgment="Contradicted accepted ADRs must be superseded and the "
+                       "old one marked deprecated (agent/human)")
+    check_row(checks, "c4-names",
+              judgment="C4 element names in diagrams/*.puml must match "
+                       "design.md (agent/human)")
+    check_row(checks, "atam-citations",
+              judgment="Every ATAM risk must cite a causing ADR or be an "
+                       "unmade decision (agent/human)")
+    return checks, violations
+
+
+def brief_verify_command(brief):
+    return brief_field(brief, "Verify")
+
+
+def review_code(root, slug, sdir, task_key, run_verify):
+    """Minimal mechanical code gate; returns (checks, violations, patterns)."""
+    checks, violations = [], []
+    tasks = spec_tasks(task_json(root), slug)
+    matches = [t for t in tasks if (t.get("uuid") or "").startswith(task_key)]
+    if len(matches) != 1:
+        return None, None, None, (f"task '{task_key}' not found or ambiguous "
+                                  f"in spec '{slug}'")
+    t = matches[0]
+    brief = first_annotation(t)
+
+    def emit(rule, fails):
+        check_row(checks, rule, fails)
+        for f in fails:
+            add_violation(violations, rule, task_path(t), f)
+
+    if not brief:
+        emit("brief-present", ["first annotation is not a brief"])
+    else:
+        check_row(checks, "brief-present", pass_detail="brief present")
+        emit("brief-verify", [] if "Verify:" in brief
+             else ["brief has no Verify:"])
+        emit("brief-done-when", [] if "Done when:" in brief
+             else ["brief has no Done when:"])
+
+    patterns = [p.strip() for p in (t.get("touches") or "").split(",")
+                if p.strip()]
+    if not patterns:
+        emit("touches-resolve", ["task has no touches UDA"])
+    else:
+        _, files, missing = estimate_tokens(root, patterns)
+        fails = []
+        if missing:
+            fails.append("globs match nothing: " + ", ".join(missing))
+        elif not files:
+            fails.append("touches resolve to no files")
+        emit("touches-resolve", fails)
+
+    if not run_verify:
+        check_row(checks, "verify-run", skip="not run (pass --run-verify)")
+    else:
+        cmd = brief_verify_command(brief)
+        if not cmd:
+            emit("verify-run", ["no Verify: command in brief"])
+        else:
+            try:
+                r = subprocess.run(cmd, shell=True, cwd=str(root),
+                                   capture_output=True, text=True, timeout=600)
+                ok = r.returncode == 0
+                tail = " ".join((r.stdout + r.stderr).strip().splitlines()[-1:])[:200]
+                detail = f"`{cmd}` -> exit {r.returncode}"
+                if tail:
+                    detail += f": {tail}"
+            except (OSError, subprocess.TimeoutExpired) as e:
+                ok, detail = False, f"`{cmd}` failed to run: {e}"
+            if ok:
+                check_row(checks, "verify-run", pass_detail=detail)
+            else:
+                emit("verify-run", [detail])
+
+    check_row(checks, "gwt-then",
+              judgment="The brief's story Then must be observably met "
+                       "(agent/human)")
+    check_row(checks, "interface-contracts",
+              judgment="design.md interface contracts must be honoured "
+                       "(agent/human)")
+    check_row(checks, "diff-within-touches",
+              judgment="Diff must stay within the touches globs (agent/human)")
+    return checks, violations, patterns, None
+
+
+def git_head(root):
+    try:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def git_changed_since(root, rev, patterns=()):
+    cmd = ["git", "-C", str(root), "diff", "--name-only", f"{rev}..HEAD"]
+    if patterns:
+        cmd += ["--", *patterns]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return []
+    if r.returncode != 0:
+        return []
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def round_summary(r):
+    return {k: r.get(k) for k in ("round", "date", "fail", "new", "fixed",
+                                  "unfixed", "escalated")}
+
+
+def md_cell(value):
+    return str(value).replace("|", "\\|").replace("\n", "; ")
+
+
+def review_report(gate, spec, checks, violations, rounds, delta, escalated,
+                  changed=(), changed_rev=None, delta_lists=()):
+    lines = [f"# Review: {gate} — {spec}", ""]
+    lines.append(f"- **Date**: {date.today().isoformat()}")
+    lines.append(f"- **Spec**: `{spec}`")
+    lines.append(f"- **Verdict**: "
+                 f"{'pass' if not violations else 'reject'} (derived)")
+    if delta:
+        lines.append(f"- **Since last run**: {delta['since']}, "
+                     f"{delta['violations']} violations then")
+    if changed_rev:
+        lines.append(f"- **Changed since** `{changed_rev[:8]}`: "
+                     f"{', '.join(changed) or 'no files in touches'}")
+    lines += ["", "## Rounds", "",
+              "| round | date | fail | new | fixed | unfixed | escalated |",
+              "|---|---|---|---|---|---|---|"]
+    for r in rounds:
+        lines.append(f"| {r.get('round')} | {r.get('date')} "
+                     f"| {r.get('fail', 0)} | {r.get('new', 0)} "
+                     f"| {r.get('fixed', 0)} | {r.get('unfixed', 0)} "
+                     f"| {r.get('escalated', 0)} |")
+    if delta_lists:
+        lines += ["", "## Delta", ""]
+        for label, items in delta_lists:
+            shown = ", ".join(f"`{v.get('rule')}` at `{v.get('path')}`"
+                              for v in items[:5])
+            more = f" (+{len(items) - 5} more)" if len(items) > 5 else ""
+            lines.append(f"- **{label}**: {len(items)}"
+                         + (f" — {shown}{more}" if items else ""))
+    lines += ["", "## Checks", "", "| rule | status | detail |",
+              "|---|---|---|"]
+    for c in checks:
+        lines.append(f"| {md_cell(c['rule'])} | {c['status']} "
+                     f"| {md_cell(c['detail'])} |")
+    lines += ["", "## Violations", "", "| rule | path | detail |",
+              "|---|---|---|"]
+    if violations:
+        for v in violations:
+            lines.append(f"| {md_cell(v['rule'])} | {md_cell(v['path'])} "
+                         f"| {md_cell(v['detail'])} |")
+    else:
+        lines.append("| (none) | | |")
+    if escalated:
+        lines += ["", "## Escalate to human", ""]
+        for v in escalated:
+            lines.append(f"- `{v['rule']}` at `{v['path']}`: unfixed for two "
+                         "consecutive rounds; the next loop is the human's.")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_review(a):
+    root = find_root(a.root)
+    check_slug(a.spec)
+    sdir = root / ESDD_DIR / "specs" / a.spec
+    if not sdir.is_dir():
+        die(f"no spec directory at {sdir}", 2)
+    patterns = []
+    if a.gate == "tickets":
+        checks, violations = review_tickets(root, a.spec, sdir)
+    elif a.gate == "design":
+        checks, violations = review_design(root, a.spec, sdir)
+    else:
+        if not a.task:
+            die("--task <uuid> is required for --gate code", 2)
+        checks, violations, patterns, err = review_code(
+            root, a.spec, sdir, a.task, a.run_verify)
+        if err:
+            die(err, 2)
+
+    state = read_state(root)
+    prev = (state.get("gates") or {}).get(a.gate)
+    if prev and prev.get("spec") not in (None, a.spec):
+        prev = None  # violation identity is per spec
+    prev_round = (prev.get("rounds") or [None])[-1] if prev else None
+    prev_ids = {(v.get("rule"), v.get("path"))
+                for v in (prev_round or {}).get("violations", [])}
+    cur_ids = {(v["rule"], v["path"]) for v in violations}
+    new = [v for v in violations if (v["rule"], v["path"]) not in prev_ids]
+    unfixed = [v for v in violations if (v["rule"], v["path"]) in prev_ids]
+    fixed = [v for v in (prev_round or {}).get("violations", [])
+             if (v.get("rule"), v.get("path")) not in cur_ids]
+
+    history = list(prev.get("rounds", [])) if prev else []
+    round_no = ((history[-1].get("round") or len(history)) + 1
+                if history else 1)
+    cur_round = {"round": round_no, "date": date.today().isoformat(),
+                 "fail": len(violations), "new": len(new),
+                 "fixed": len(fixed), "unfixed": len(unfixed),
+                 "escalated": 0,
+                 "violations": [{"rule": v["rule"], "path": v["path"]}
+                                for v in violations]}
+    history.append(cur_round)
+    escalated = []
+    for v in violations:
+        streak = 0
+        for r in reversed(history):
+            if any(x.get("rule") == v["rule"] and x.get("path") == v["path"]
+                   for x in r.get("violations", [])):
+                streak += 1
+            else:
+                break
+        v["escalate"] = streak >= 2
+        if v["escalate"]:
+            escalated.append(v)
+    cur_round["escalated"] = len(escalated)
+    rounds = history[-10:]
+
+    delta = None
+    changed, changed_rev = [], None
+    if prev_round:
+        delta = {"since": prev.get("last_run"),
+                 "violations": prev.get("violations", 0),
+                 "new": len(new), "fixed": len(fixed),
+                 "unfixed": len(unfixed),
+                 "new_items": [{"rule": v["rule"], "path": v["path"]}
+                               for v in new],
+                 "fixed_items": [{"rule": v.get("rule"),
+                                  "path": v.get("path")} for v in fixed],
+                 "unfixed_items": [{"rule": v["rule"], "path": v["path"]}
+                                   for v in unfixed]}
+        if a.gate == "code" and prev.get("git_rev"):
+            changed_rev = prev["git_rev"]
+            changed = git_changed_since(root, changed_rev, patterns)
+
+    state.setdefault("gates", {})[a.gate] = {
+        "spec": a.spec,
+        "last_run": date.today().isoformat(),
+        "git_rev": git_head(root),
+        "violations": len(violations),
+        "rounds": rounds,
+    }
+    write_state(root, state)
+
+    report_path = (Path(a.out).expanduser() if a.out
+                   else sdir / f"review-{a.gate}.md")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(review_report(
+        a.gate, a.spec, checks, violations, rounds, delta, escalated,
+        changed, changed_rev,
+        [("new", new), ("fixed", fixed), ("unfixed", unfixed)]
+        if prev_round else ()))
+
+    if a.json:
+        payload = {"gate": a.gate, "spec": a.spec,
+                   "pass": not violations, "violations": violations,
+                   "checks": checks,
+                   "rounds": [round_summary(r) for r in rounds]}
+        if delta:
+            payload["delta"] = delta
+        if changed_rev:
+            payload["changed_since"] = {"rev": changed_rev, "files": changed}
+        out(json.dumps(payload))
+    else:
+        out(f"review {a.gate} — {a.spec}: "
+            f"{'PASS' if not violations else 'FAIL'}")
+        if delta:
+            out(f"since last run: {delta['since']}, "
+                f"{delta['violations']} violations then")
+        if changed_rev:
+            out(f"changed since {changed_rev[:8]}: "
+                f"{', '.join(changed) or 'no files in touches'}")
+        for c in checks:
+            if c["status"] != "pass":
+                out(f"  {c['status'].upper():8} {c['rule']}: {c['detail']}")
+        for v in violations:
+            flag = "  [ESCALATE]" if v.get("escalate") else ""
+            out(f"  FAIL     {v['rule']} {v['path']}: {v['detail']}{flag}")
+        if escalated:
+            out("escalate to human: " + ", ".join(
+                f"{v['rule']} at {v['path']}" for v in escalated))
+        out(f"report: {report_path}")
+    sys.exit(1 if violations else 0)
 
 
 # ------------------------------------------------------------------- graph ---
@@ -852,6 +1601,8 @@ def cmd_phase(a):
             die("spec required: esdd phase <name> --spec <slug>")
     missing = [r.format(s=slug) for r in PHASES[a.name]["requires"]]
     missing = [m for m in missing if not (root / ESDD_DIR / m).exists()]
+    if missing and a.strict:
+        die(f"phase '{a.name}' is missing prerequisites: {', '.join(missing)}", 2)
     if missing:
         warn(f"phase '{a.name}' is missing prerequisites: {', '.join(missing)}")
     if a.done:
@@ -892,6 +1643,7 @@ def main():
     pe = sub.add_parser("env", help="read/write .esdd/env")
     pe.add_argument("key", nargs="?")
     pe.add_argument("value", nargs="?")
+    pe.add_argument("extra", nargs="?", help=argparse.SUPPRESS)
     pe.add_argument("--unset")
     pe.set_defaults(fn=cmd_env)
 
@@ -900,6 +1652,17 @@ def main():
                      help="disable confirmation prompts (scripts)")
     ptw.add_argument("args", nargs=argparse.REMAINDER)
     ptw.set_defaults(fn=cmd_tw)
+
+    ppo = sub.add_parser("po", help="Product Owner entry points")
+    pposub = ppo.add_subparsers(dest="pocmd", required=True)
+    ppoi = pposub.add_parser("import", help="copy an external spec/plan into "
+                             ".esdd/specs/<slug>/sources/ for PO import mode")
+    ppoi.add_argument("file", help="Jira export, Taskmaster tasks.json, plan.md, ...")
+    ppoi.add_argument("--spec", required=True, help="target spec slug")
+    ppoi.add_argument("--project", default="core",
+                      help="middle project segment (default: core)")
+    ppoi.add_argument("--title", help="human-readable title")
+    ppoi.set_defaults(fn=cmd_po_import)
 
     ps = sub.add_parser("spec", help="manage specs")
     sp = ps.add_subparsers(dest="scmd", required=True)
@@ -913,6 +1676,7 @@ def main():
     psn.add_argument("--force", action="store_true")
     psn.set_defaults(fn=cmd_spec_new)
     psl = sp.add_parser("list", help="list specs and artifact status")
+    psl.add_argument("--json", action="store_true", help="machine-readable output")
     psl.set_defaults(fn=cmd_spec_list)
 
     pa = sub.add_parser("adr", help="manage MADR ADRs (3 levels)")
@@ -931,6 +1695,7 @@ def main():
     pm = sub.add_parser("matrix", help="blocking-edge matrix from task export")
     pm.add_argument("--spec")
     pm.add_argument("--out", help="write markdown to this file")
+    pm.add_argument("--json", action="store_true", help="machine-readable output")
     pm.set_defaults(fn=cmd_matrix)
 
     pe2 = sub.add_parser("estimate", help="token estimates from touches UDA")
@@ -939,11 +1704,29 @@ def main():
                      help="also list tasks without touches")
     pe2.add_argument("--set", action="store_true",
                      help="write token_estimate back to tasks")
+    pe2.add_argument("--touches",
+                     help="estimate these comma-separated globs directly "
+                          "(no Taskwarrior needed; tasks.md fallback)")
+    pe2.add_argument("--json", action="store_true", help="machine-readable output")
     pe2.set_defaults(fn=cmd_estimate)
 
     pv = sub.add_parser("verify", help="handoff gate for a spec")
     pv.add_argument("--spec", required=True)
+    pv.add_argument("--json", action="store_true", help="machine-readable output")
     pv.set_defaults(fn=cmd_verify)
+
+    prv = sub.add_parser("review", help="deterministic review gates "
+                                       "(design/tickets/code)")
+    prv.add_argument("--gate", required=True, choices=REVIEW_GATES)
+    prv.add_argument("--spec", required=True)
+    prv.add_argument("--task", help="task uuid/prefix (required for --gate code)")
+    prv.add_argument("--json", action="store_true", help="machine-readable output")
+    prv.add_argument("--out", help="write the markdown report here "
+                                   "(default: spec dir review-<gate>.md)")
+    prv.add_argument("--run-verify", action="store_true",
+                     help="code gate: execute the brief's Verify command "
+                          "(default: off)")
+    prv.set_defaults(fn=cmd_review)
 
     pg = sub.add_parser("import", help="cache a graph/nav source into .esdd/graph/")
     pg.add_argument("--source", help="e.g. codegraph, graphify, falkordb, neo4j, "
@@ -963,6 +1746,8 @@ def main():
     pp.add_argument("name", nargs="?", choices=list(PHASES))
     pp.add_argument("--spec")
     pp.add_argument("--done", action="store_true", help="mark phase completed")
+    pp.add_argument("--strict", action="store_true",
+                    help="exit 2 without changing state if prerequisites are missing")
     pp.set_defaults(fn=cmd_phase)
 
     a = p.parse_args()

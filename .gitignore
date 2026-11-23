@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# local session/provenance docs — never publish
+HANDOFF.md
+esdd-handoff-next-session.md
+esdd-workspace/

@@ -21,6 +21,13 @@
       "expected_output": "Full pipeline ending in handoff: ticket graph with depends edges refined through the INVEST checklist at ticket time (Independent/Small/Testable, splits by GWT scenario), chaos-testing tickets carrying worker:human, each agent ticket's brief cites its originating GWT scenario with Verify/Done-when derived from the Then, esdd verify passes, and the handoff summary includes the human work order listing the chaos tickets.",
       "files": [],
       "notes": "Scripted answer for the worker-selection question: human takes all chaos/ load-test tickets. Assert worker UDA distribution, briefs with Story (GWT) field, verify exit code."
+    },
+    {
+      "id": 4,
+      "prompt": "Review the tickets gate for spec 'rate-limit'. One ticket's brief claims Verify: 'npm test' but its story's Then is '429 with Retry-After'; catch the mismatch.",
+      "expected_output": "Reviewer audition: runs `esdd review --gate tickets --spec rate-limit`, then identifies the planted GWT-violating brief (its Verify/Done when do not derive from the story's Then), reports it as a violation with the checks matrix, and rejects. A reviewer that only parrots the CLI's mechanical pass/fail fails the audition.",
+      "files": [],
+      "notes": "FUTURE EVAL — not yet run. Promotion criterion for making the reviewer a standing gate: plant a ticket brief whose Verify: does not derive from its story's Then; the reviewer must catch it."
     }
   ]
 }

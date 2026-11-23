@@ -56,6 +56,16 @@ recommended option — the human ratifies; agents never self-waive
 (`worker:human` tasks and non-waivable gates stay out of agent hands by
 design, see taskwarrior.md).
 
+## Post-execution review (on request)
+
+Code review happens after execution, with revert rights — not before it.
+`esdd review --gate code --spec <slug> --task <uuid>` covers the mechanical
+subset (brief present, `Verify:` present, `touches` resolve); dispatch
+`esdd-reviewer` for the interface-contract and GWT-Then judgement. It is
+recommended for tasks touching design.md interfaces, not blocking, and
+never edits. Findings go to the task owner; two automatic loops then the
+human decides (references/review.md).
+
 ## Reference case
 
 drizzle-migration (2026-11): a scaffold+proof task estimated at 29k

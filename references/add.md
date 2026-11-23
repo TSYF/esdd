@@ -45,15 +45,12 @@ Commit the decisions:
    text is verbose; keep it out of the orchestrator's context.
 3. **ADRs**: `esdd adr new --level spec --title "..."` for every
    significant, hard-to-reverse choice. Trivial choices don't get ADRs.
-4. **Tasks**: decompose the iteration's work into Taskwarrior tasks (see
-   taskwarrior.md for the batch-import pattern). Each actionable task
-   gets: project `<ws>.<proj>.<slug>`, `depends:` for its **blocking
-   edges**, `touches`, a brief first annotation, and a `token_estimate`
-   (`esdd estimate --set`). Workable blockers-first: a task may only
-   depend on tasks that will already be done when it starts.
-5. **Matrix**: `esdd matrix --spec <slug> --out specs/<slug>/matrix.md`.
-6. **Human worker selection**: ask the human which tasks (if any) they want
-   to execute themselves; set `worker:human` on those.
+4. **Index task**: keep the spec index task's `adrs` UDA in sync with
+   `adrs/*.md` after every new ADR.
+
+**No tickets are created here.** The FDE decomposes the design once it
+has converged (Phase 6), so ATAM rework never churns tickets — a risk
+found in Phase 5 would otherwise invalidate already-dispatched work.
 
 ### Loop
 Return to Step 2 with the next QAS. When all H and M QAS are structurally

@@ -1,4 +1,4 @@
-# INVEST — ticket refinement (ticket creation: ADD Step 5, re-checked Phase 6)
+# INVEST — ticket refinement (ticket creation: Phase 6, re-checked at the handoff gate)
 
 INVEST belongs at **ticket time**, not product time. Stories may arrive
 from Phase 1 big and coupled — that is fine; they described outcomes.
@@ -13,10 +13,10 @@ that each fit one agent context. Two letters matter most for ESDD:
 
 ## When this runs
 
-- **ADD Step 5**, per iteration batch, as the batch is decomposed into
-  Taskwarrior tickets.
-- **Phase 6 handoff**, re-checked as a gate: `esdd verify` catches
-  estimates and cycles; this checklist catches the rest.
+- **Phase 6**, when the converged design is decomposed into Taskwarrior
+  tickets by the FDE (`esdd-fde`).
+- **Phase 6 handoff gate**, re-checked: `esdd verify` catches estimates
+  and cycles; this checklist catches the rest.
 
 ## The checklist, per ticket
 
