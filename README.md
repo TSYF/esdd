@@ -19,7 +19,7 @@ and the day-to-day entry points.
 | Tool | Needed for | Without it |
 |------|-----------|------------|
 | Python 3 | `scripts/esdd`, the deterministic CLI (stdlib only) | required |
-| Taskwarrior (3.x) | the task graph (`depends`, workers, estimates) | tasks go to a `tasks.md` ledger; the graph is never materialized |
+| Taskwarrior (2.6+) | the task graph (`depends`, workers, estimates) | tasks go to a `tasks.md` ledger; the graph is never materialized |
 | PlantUML | rendering `diagrams/*.puml` | sources are still the spec; design.md notes they're unrendered |
 
 The CLI creates an empty `.esdd/tasks/` taskrc when you have no Taskwarrior
@@ -50,6 +50,24 @@ and uses the agent files as its brief.
 All human contact stays with the orchestrator. A specialist that needs an
 answer stops and returns the question instead of guessing. Business gaps
 found later are routed back to the PO.
+
+## Optional complement: Ponytail
+
+[Ponytail](https://github.com/DietrichGebert/ponytail) (MIT) is a bias,
+not a workflow: *exhaustive thinking, lazy code.* ESDD borrows it where
+code is expensive and leaves the thinking phases exhaustive:
+
+- execution briefs inherit the smallest-complete-change ladder and the
+  end-of-report disclosure line (`references/execution.md` rule 7);
+- `/ponytail-review` is the on-request craftsmanship pass — bugs,
+  security, real load, missing tests, what to cut — beside the
+  contract-only `esdd review --gate code` (`references/review.md`);
+- `/ponytail-audit` supplies the ranked defect list after retro; must-fix
+  findings enter the lite path as GWT stories (`references/retro.md`).
+
+Nothing requires Ponytail. Absent, the craftsmanship judgment rows stay
+with the human. Its band/board/gain accounting is Claude Code-specific;
+`token_estimate` is ESDD's accounting.
 
 ## Three ways in
 

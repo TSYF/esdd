@@ -18,6 +18,7 @@ what is expensive to discover late.
 | Interface exists before a ticket touches it | **pre-gate** | A missing contract becomes a cross-ticket blocking edge |
 | Mechanical lint (brief fields, token band, worker, ADR status, diagram refs) | **`esdd review`** | Deterministic, no judgment, cheap to re-run |
 | Interface contracts honoured, Then observably met, diff within touches | **post-execution** | Needs the code; run with revert rights after the task |
+| Craftsmanship: bugs, security, real load, missing tests, what to cut | post-execution, on request (`/ponytail-review`) | Needs the code and the diff; a judgment pass, not a contract check |
 | Style, naming, design taste | post-execution, human | Not a gate |
 
 Review never edits artifacts. Findings go to the owner; the owner fixes.
@@ -77,7 +78,8 @@ citations.
 
 ### Gate `code`
 
-Minimal mechanical subset for one executed task:
+`esdd review --gate code` covers **contract conformance** — the part that
+can be decided from the task's brief and the diff:
 
 - the first annotation is a brief;
 - the brief carries `Verify:` and `Done when:`;
@@ -89,6 +91,16 @@ Judgment rows: the GWT Then is observably met, design.md interface
 contracts are honoured, the diff stays within `touches`. The
 inert→enforced validation audit (`references/validation-audit.md`) is a
 judgment item when the change replaces validation.
+
+**Craftsmanship is a separate pass.** `/ponytail-review` (when installed)
+is the on-request judgment review for bugs, security, real load, missing
+tests, and what to cut — including code outside the diff. Scope it to the
+task's delta range: the code gate's stored `git_rev` (or the task's start
+commit when the gate has not run yet) through HEAD, limited to the task's
+`touches`. Map its four-part findings (what it does / what goes wrong /
+how to fix / what happens if skipped) into the `rule | path | detail`
+violations table. It never judges GWT conformance: it doesn't know the
+contract. Without ponytail, those rows stay `judgment` for the human.
 
 ## Report format
 

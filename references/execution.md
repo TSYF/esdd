@@ -2,9 +2,9 @@
 
 How to run the materialized task graph without the failure modes that
 burned the reference case (below). These rules are enforced through task
-annotations and briefs, not vibes.
+annotations, briefs, code comments and report lines, not vibes.
 
-## The six standing rules
+## The seven standing rules
 
 1. **Spike-first.** Any task whose estimate rests on "first run of new
    tooling" or "two sources of truth must be compared" gets a preceding
@@ -24,6 +24,7 @@ annotations and briefs, not vibes.
    produces one artifact + one report line, so a dead agent leaves
    recoverable state and orchestrator forensics costs ≈ zero. Silent
    agent deaths (no artifacts, no report) cost the reference case ~2×.
+   The report closes with the Rule 7 disclosure line.
 5. **First-red triage.** If the FIRST attempt on a task (or step) fails,
    triage before any retry — split / spike / HUMAN. Never blind-retry.
    The human option exists because "tool internals contradict their
@@ -34,6 +35,20 @@ annotations and briefs, not vibes.
    floor for volume-only tickets. Manually inflate — or better, split —
    when uncertainty work is present; estimates computed from globs
    matching not-yet-existing files are 0 and need honest manual values.
+7. **Smallest complete change.** Stop at the first rung that holds: does
+   it need to exist → already in the codebase → stdlib → platform feature
+   → installed dependency → one line → minimum code plus one small test
+   for non-trivial logic. Lazy applies to code, not to the thinking
+   around it. Never cut: validation at trust boundaries, data-loss error
+   handling, security, accessibility. A deliberate shortcut leaves
+   `shortcut: <limit>, <when to upgrade>` in the code. Every execution
+   report ends with what was skipped or not checked and the risk that
+   leaves — a silent shortcut is the only expensive one. This
+   characterizes execution agents only: PO and Architect work stays
+   exhaustive, and a spike brief is boss (depth is its deliverable).
+   With ponytail installed, reserve `ultra` for audit-flavored passes.
+   The slogan: *exhaustive thinking, lazy code.* (Bias from Ponytail,
+   MIT: `DietrichGebert/ponytail`.)
 
 ## Concurrency
 
@@ -63,8 +78,10 @@ Code review happens after execution, with revert rights — not before it.
 subset (brief present, `Verify:` present, `touches` resolve); dispatch
 `esdd-reviewer` for the interface-contract and GWT-Then judgement. It is
 recommended for tasks touching design.md interfaces, not blocking, and
-never edits. Findings go to the task owner; two automatic loops then the
-human decides (references/review.md).
+never edits. Craftsmanship — bugs, security, real load, missing tests,
+what to cut — is `/ponytail-review`'s on-request pass over the task's
+delta, not the contract gate (references/review.md). Findings go to the
+task owner; two automatic loops then the human decides.
 
 ## Reference case
 

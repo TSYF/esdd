@@ -6,7 +6,23 @@
       "prompt": "I want to add rate limiting to this API. It needs per-endpoint limits configured in YAML, a shared Redis store so all instances count together, and it must not add more than 5ms to p99 latency. ESDD this feature for me.",
       "expected_output": "Full ESDD pipeline: .esdd scaffolded (or reused), spec 'rate-limit' with proposal.md carrying per-story Given/When/Then acceptance scenarios (standard Gherkin order, observable Thens) and a traced Impact Map (goal/actor/impact/deliverable), utility-tree.md with ASRs seeded from the impact map and H/M/L-ranked QAS (latency QAS with numeric measure), design.md with C4 + sequence diagrams, spec-level MADR ADRs, Taskwarrior ticket graph under project <ws>.core.rate-limit with blocking edges, INVEST applied at TICKET time (not in the proposal), tickets' Verify/Done-when derived from originating GWT scenarios, estimates under 100k, index task with synced adrs UDA. Human must be grilled during the run (scripted answers: yes to defaults, per-endpoint limits negotiable, team owns Redis ops).",
       "files": [],
-      "notes": "Interactive: the runner must answer Product-phase questions (goals/actors/impacts/stories + GWT walk-through) and ranking questions with the scripted answers above. Assertions to draft at run time: file existence, every story has a GWT block, Impact Map table present and traced, no INVEST table in proposal.md, QAS measure numeric, project naming, task briefs reference GWT scenarios, verify passes."
+      "expectations": [
+        "A .esdd workspace exists at the repo root",
+        "proposal.md exists for a rate-limit spec and every story has a Gherkin Given/When/Then block",
+        "proposal.md carries an Impact Map with at least one filled row tracing to a story",
+        "proposal.md records the three constraints verbatim (YAML, shared Redis, 5ms p99)",
+        "utility-tree.md has drivers, an ASR table, and ranked QAS with a numeric latency response measure (<=5ms)",
+        "design.md has an Overview and an Interfaces section with named contracts",
+        "at least two PlantUML diagrams exist and design.md references them",
+        "at least two spec-level MADR ADRs exist with a Status section",
+        "the Taskwarrior task graph has at least five actionable tickets, each with a brief naming a US-n, Verify:, Done when:, a worker, and an estimate under 100k",
+        "at least one ticket carries a worker:human assignment for load/soak or failover work",
+        "the ticket graph has at least one depends edge and no cycles",
+        "esdd verify --spec rate-limit exits 0",
+        "esdd review --gate tickets --spec rate-limit exits 0",
+        "No INVEST table appears in proposal.md (INVEST belongs at ticket time)"
+      ],
+      "notes": "Interactive: the runner must answer Product-phase questions (goals/actors/impacts/stories + GWT walk-through) and ranking questions with the scripted answers above. The scripted answer set used in iteration-1 lives with the run."
     },
     {
       "id": 2,
@@ -27,7 +43,21 @@
       "prompt": "Review the tickets gate for spec 'rate-limit'. One ticket's brief claims Verify: 'npm test' but its story's Then is '429 with Retry-After'; catch the mismatch.",
       "expected_output": "Reviewer audition: runs `esdd review --gate tickets --spec rate-limit`, then identifies the planted GWT-violating brief (its Verify/Done when do not derive from the story's Then), reports it as a violation with the checks matrix, and rejects. A reviewer that only parrots the CLI's mechanical pass/fail fails the audition.",
       "files": [],
-      "notes": "FUTURE EVAL — not yet run. Promotion criterion for making the reviewer a standing gate: plant a ticket brief whose Verify: does not derive from its story's Then; the reviewer must catch it."
+      "notes": "FUTURE EVAL — not yet run. Promotion criterion for making the reviewer a standing gate: plant a ticket brief whose Verify: does not derive from its story's Then; the reviewer must catch it. Second axis lives in eval 6."
+    },
+    {
+      "id": 5,
+      "prompt": "Execute these three small tickets in the sample API repo. Ticket A: add a GET /health endpoint. Ticket B: reject POST /widgets payloads over 1 MB with 413. Ticket C: add a --dry-run flag to the widgets import script. Keep the change minimal and report exactly what you skipped.",
+      "expected_output": "Each ticket stops at the smallest rung that holds (existing helper or platform feature before new code; stdlib before dependency), B keeps validation at the trust boundary, the non-trivial logic gets one small test, and every report ends with a skipped/not-checked + risk line. Against the same briefs without the Rule 7 characterization: fewer lines added, fewer files touched, no unnecessary dependency, and the disclosure present.",
+      "files": [],
+      "notes": "Ponytail AB test. Run once with the Rule 7 characterization in the brief and once without. Metrics: lines added, files touched, dependency additions, disclosure present/quality. A run that drops B's 413 validation fails regardless of size."
+    },
+    {
+      "id": 6,
+      "prompt": "Review the code for spec 'rate-limit' task <uuid>. The brief's Verify: 'npm test' does not derive from the story's Then '429 with Retry-After'; the implementation trusts an X-Forwarded-For header to pick the bucket key, swallows Redis timeouts as allow, and has no test for the over-limit path. Split the findings between contract conformance and craftsmanship.",
+      "expected_output": "`esdd review --gate code` plus `esdd-reviewer` flag the contract violation (Verify/Done when do not derive from the Then). `/ponytail-review` flags the craftsmanship findings (spoofable bucket key, fail-open Redis timeout, missing over-limit test) and explicitly does not rule on GWT conformance. Both land in the same violations table with the split visible.",
+      "files": [],
+      "notes": "Second axis of eval 4. Score recall per reviewer: the contract reviewer must catch the GWT mismatch; the craftsmanship reviewer must catch all three planted defects and must not claim the Then is met. A reviewer that parrots the CLI or crosses axes fails."
     }
   ]
 }

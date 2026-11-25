@@ -164,3 +164,13 @@ Delegate to the diagrammer sub-agent:
 - The human may correct anything; corrections edit catalogue.md /
   design.md / ADR statuses — re-running retro is unnecessary and
   forbidden (it would discard human corrections).
+
+### Step 6 — Adopt + fix (on request)
+
+Retro documents; it does not grade. When the human wants the debt list,
+run `/ponytail-audit` (Ponytail, MIT) after Step 5. It returns a ranked
+defect list; map severity to ESDD's language: must-fix ≈ blocks-goal,
+should-fix ≈ needs-mitigation, nice ≈ watch. Must-fix items become GWT
+stories through the lite path (PO → FDE → `esdd review --gate tickets`),
+not edits to retro's artifacts — retro output stays descriptive, and the
+audit never edits files. The human owns triage.

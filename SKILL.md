@@ -254,6 +254,10 @@ mechanical checks; dispatch `esdd-reviewer` when the change touches
 design.md interfaces, or when the human asks. Inputs are the task's
 brief and the diff over its `touches`; it passes only when the GWT Then
 is observably met and the interface contracts in design.md are honoured.
+Contract conformance is this gate's job. Craftsmanship — bugs, security,
+real load, missing tests, what to cut — is `/ponytail-review`'s
+on-request pass over the task's delta, and it never judges GWT
+conformance (`references/review.md`).
 
 ### Lite path — tickets from a decided plan (PO → FDE → `esdd review`)
 
@@ -300,6 +304,9 @@ Context" future QAWs read. Token thrift is the phase's governing rule:
    `specs/_shared/` diagrams, with provenance and per-element confidence.
 5. `esdd phase retro --done`; hand the one-screen report. Corrections
    from the human are edits to the artifacts — never a re-run.
+6. **Adopt + fix, on request:** `/ponytail-audit` gives the ranked defect
+   list; must-fix findings become GWT stories through the lite path, not
+   retro edits (`references/retro.md`). The audit never edits files.
 
 ## Sub-agent briefs
 
@@ -314,8 +321,11 @@ the four roles; keep them lean, since context isolation is the point.
 **Task dispatch (post-handoff execution)** — read `references/execution.md`
 first: spike-first ticketing, morphology splits, standing workbench
 bootstrap, step-verified reporting, first-red triage (split / spike /
-HUMAN — never blind-retry), estimator calibration. These rules are
-enforced through task annotations and briefs, not remembered.
+HUMAN — never blind-retry), estimator calibration, smallest complete
+change. The last is the ponytail bias — exhaustive thinking, lazy code —
+and it applies to execution agents only, never to PO/Architect phases or
+spike briefs. These rules are enforced through task annotations and
+briefs, not remembered.
 
 **Drafter** (proposal sections, QAS drafts, ADR drafts, design.md text):
 

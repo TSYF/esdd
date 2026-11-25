@@ -54,7 +54,9 @@ answers to earlier questions as `[{id, answer}]`.
 2. **Read the previous `review-<gate>.md` on re-dispatch** and re-examine
    only changed or unfixed items (references/review.md, Delta discipline).
 3. **Judge only what the CLI cannot see**, using the gate checklist in
-   `references/review.md`; emit those as `status: judgment` rows.
+   `references/review.md`; emit those as `status: judgment` rows. Style,
+   naming and craftsmanship are not your rows: `/ponytail-review` or the
+   human owns that pass, and neither may judge GWT conformance.
 4. Rank violations by how far they propagate (a broken trace upstream
    outranks a style miss).
 5. Write/fill `review-<gate>.md` with the checks matrix and the violations
